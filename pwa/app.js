@@ -21,6 +21,8 @@ const DEFAULT_PRESETS = [
 const appEl = document.getElementById("app")
 const modalEl = document.getElementById("modal")
 const toastEl = document.getElementById("toast")
+const bootEl = document.getElementById("boot")
+const bootStartedAt = performance.now()
 
 let supabaseClient = null
 let cloudSaveTimer = null
@@ -1915,6 +1917,19 @@ function toast(message) {
   }, 1800)
 }
 
+function hideBootSplash() {
+  if (!bootEl) return
+
+  const minVisibleMs = 850
+  const elapsed = performance.now() - bootStartedAt
+  const wait = Math.max(0, minVisibleMs - elapsed)
+
+  window.setTimeout(() => {
+    bootEl.classList.add("boot-exit")
+    window.setTimeout(() => bootEl.remove(), 520)
+  }, wait)
+}
+
 window.addEventListener("beforeinstallprompt", event => {
   event.preventDefault()
   app.installPrompt = event
@@ -1931,4 +1946,5 @@ if ("serviceWorker" in navigator) {
 }
 
 render()
+requestAnimationFrame(hideBootSplash)
 initCloud()

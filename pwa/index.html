@@ -23,21 +23,34 @@
   <link rel="apple-touch-startup-image" href="./splash/launch-1290x2796.png" media="(device-width: 430px) and (device-height: 932px) and (-webkit-device-pixel-ratio: 3)">
   <style>
     html,body{margin:0;min-height:100%;background:#F6F8FA;color:#111827;font-family:-apple-system,BlinkMacSystemFont,"SF Pro Display","SF Pro Text",system-ui,sans-serif}
-    .boot-splash{position:fixed;inset:0;display:grid;place-items:center;background:#F6F8FA}
-    .boot-mark{width:92px;height:92px;border-radius:22px;box-shadow:0 18px 46px rgba(17,24,39,.18)}
-    .boot-loader{position:absolute;left:50%;bottom:calc(70px + env(safe-area-inset-bottom));width:44px;height:3px;overflow:hidden;border-radius:999px;background:#DDE3EA;transform:translateX(-50%)}
-    .boot-loader span{display:block;width:38%;height:100%;border-radius:999px;background:#0F766E;animation:boot-slide 1s ease-in-out infinite}
-    @keyframes boot-slide{0%{transform:translateX(-105%)}50%{transform:translateX(85%)}100%{transform:translateX(270%)}}
+    .boot-screen{position:fixed;inset:0;z-index:9999;display:grid;place-items:center;overflow:hidden;background:#F6F8FA;transition:opacity .48s cubic-bezier(.22,1,.36,1),visibility .48s cubic-bezier(.22,1,.36,1)}
+    .boot-screen::before{content:"";position:absolute;inset:0;background:linear-gradient(145deg,#FFFFFF 0%,#F6F8FA 45%,#EDF5F3 100%)}
+    .boot-screen::after{content:"";position:absolute;inset:-1px;background:repeating-linear-gradient(90deg,rgba(15,23,42,.035) 0 1px,transparent 1px 28px),repeating-linear-gradient(0deg,rgba(15,23,42,.025) 0 1px,transparent 1px 28px);opacity:.42;mask-image:linear-gradient(to bottom,transparent 0%,#000 18%,#000 76%,transparent 100%)}
+    .boot-core{position:relative;z-index:1;display:grid;justify-items:center;gap:20px;transform:translateY(-2vh)}
+    .boot-icon-shell{--boot-size:clamp(142px,30vw,172px);position:relative;width:var(--boot-size);height:var(--boot-size);display:grid;place-items:center;border-radius:calc(var(--boot-size) * .26)}
+    .boot-icon-shell::before{content:"";position:absolute;inset:calc(var(--boot-size) * -.08);padding:2px;border-radius:calc(var(--boot-size) * .31);background:conic-gradient(from 0deg,rgba(15,118,110,0),rgba(15,118,110,.72),rgba(53,209,165,.2),rgba(15,118,110,0));-webkit-mask:linear-gradient(#000 0 0) content-box,linear-gradient(#000 0 0);-webkit-mask-composite:xor;mask-composite:exclude;animation:boot-spin 3.4s linear infinite}
+    .boot-icon-shell::after{content:"";position:absolute;inset:-1px;border-radius:calc(var(--boot-size) * .26);background:linear-gradient(180deg,rgba(255,255,255,.86),rgba(255,255,255,0));box-shadow:0 28px 78px rgba(15,23,42,.18),0 0 0 1px rgba(255,255,255,.64) inset}
+    .boot-mark{position:relative;z-index:2;width:calc(var(--boot-size) * .79);height:calc(var(--boot-size) * .79);border-radius:calc(var(--boot-size) * .19);box-shadow:0 20px 48px rgba(17,24,39,.2);animation:boot-float 2.8s ease-in-out infinite}
+    .boot-progress{width:128px;height:4px;overflow:hidden;border-radius:999px;background:#DDE3EA;box-shadow:0 1px 0 rgba(255,255,255,.8) inset}
+    .boot-progress span{display:block;width:46%;height:100%;border-radius:999px;background:linear-gradient(90deg,#0F766E,#35D1A5);animation:boot-slide 1.15s cubic-bezier(.65,0,.35,1) infinite}
+    .boot-screen.boot-exit{opacity:0;visibility:hidden;pointer-events:none}
+    @keyframes boot-spin{to{transform:rotate(360deg)}}
+    @keyframes boot-float{0%,100%{transform:translateY(0) scale(1)}50%{transform:translateY(-7px) scale(1.018)}}
+    @keyframes boot-slide{0%{transform:translateX(-115%)}50%{transform:translateX(84%)}100%{transform:translateX(260%)}}
+    @media (prefers-reduced-motion:reduce){.boot-icon-shell::before,.boot-mark,.boot-progress span{animation:none}}
   </style>
   <link rel="stylesheet" href="./styles.css">
 </head>
 <body>
-  <main class="app" id="app" aria-live="polite">
-    <div class="boot-splash" role="status" aria-label="Cargando presupuesto">
+  <main class="app" id="app" aria-live="polite"></main>
+  <div class="boot-screen" id="boot" role="status" aria-label="Cargando presupuesto">
+    <div class="boot-core">
+      <div class="boot-icon-shell" aria-hidden="true">
       <img class="boot-mark" src="./icons/icon-180.png" alt="">
-      <div class="boot-loader" aria-hidden="true"><span></span></div>
+      </div>
+      <div class="boot-progress" aria-hidden="true"><span></span></div>
     </div>
-  </main>
+  </div>
   <div class="modal" id="modal" aria-hidden="true"></div>
   <div class="toast" id="toast" role="status"></div>
   <script src="./vendor/supabase.min.js" defer></script>
