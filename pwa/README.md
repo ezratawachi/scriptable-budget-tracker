@@ -25,13 +25,13 @@ Opciones recomendadas para publicarla:
 
 ## Sobre guardado en la nube
 
-La versión actual guarda los datos localmente en el navegador del dispositivo. Eso funciona offline, pero no es sincronización cloud automática.
+La app guarda primero localmente para que funcione offline, y además sincroniza con Supabase cuando inicias sesión por magic link.
 
-Para nube real entre iPhone/Mac/dispositivos, hay que conectar un backend. La opción recomendada es Supabase:
+Proyecto conectado:
 
-1. Crear un proyecto en Supabase.
-2. Crear una tabla para guardar un JSON por usuario.
-3. Activar autenticación por email.
-4. Conectar la PWA con `SUPABASE_URL` y `SUPABASE_ANON_KEY`.
+1. Supabase project: `budget-tracker`.
+2. Tabla: `public.budget_sync`.
+3. Auth: magic link por email.
+4. PWA publicada: `https://ezratawachi.github.io/scriptable-budget-tracker/pwa/`.
 
-Hasta que eso esté conectado, usa Exportar JSON como respaldo frecuente en iCloud Drive.
+Al conectar el email por primera vez, la PWA sube tu data actual a Supabase si todavía no existe una copia en la nube. Después de eso, cada gasto, categoría, preset o deseo se sube automáticamente.

@@ -146,6 +146,33 @@ input:focus-visible{
   font-size:18px;
 }
 
+.cloud-btn{
+  position:relative;
+}
+
+.cloud-btn.online{
+  border-color:rgba(15,118,110,.24);
+  background:var(--grn2);
+  color:var(--grn);
+}
+
+.cloud-btn.online::after,
+.cloud-btn.syncing::after{
+  content:"";
+  position:absolute;
+  right:7px;
+  top:7px;
+  width:7px;
+  height:7px;
+  border:2px solid var(--card);
+  border-radius:999px;
+  background:var(--grn);
+}
+
+.cloud-btn.syncing::after{
+  background:var(--amb);
+}
+
 .top-btn:active,
 .round-btn:active,
 .back-btn:active,
@@ -620,6 +647,11 @@ input:focus-visible{
   cursor:not-allowed;
 }
 
+button:disabled{
+  opacity:.64;
+  cursor:not-allowed;
+}
+
 .secondary-btn{
   border:.5px solid var(--bord);
   background:var(--card2);
@@ -864,6 +896,100 @@ input:focus-visible{
   font-weight:700;
   line-height:1.35;
   margin-bottom:12px;
+}
+
+.cloud-panel{
+  border:.5px solid var(--bord);
+  border-radius:var(--r);
+  background:linear-gradient(180deg,#FFFFFF 0%,#F8FBFF 100%);
+  box-shadow:var(--shadow-xs);
+  padding:12px;
+  margin:12px 0;
+}
+
+.cloud-panel.connected{
+  border-color:rgba(15,118,110,.22);
+  background:linear-gradient(180deg,#FFFFFF 0%,#F2FBF8 100%);
+}
+
+.cloud-head,
+.cloud-account{
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  gap:10px;
+}
+
+.cloud-kicker{
+  color:var(--blue);
+  font-size:11px;
+  font-weight:900;
+  text-transform:uppercase;
+}
+
+.cloud-title{
+  margin-top:2px;
+  color:var(--txt);
+  font-size:15px;
+  font-weight:900;
+}
+
+.cloud-dot{
+  width:12px;
+  height:12px;
+  border-radius:999px;
+  background:var(--soft);
+  flex-shrink:0;
+}
+
+.cloud-dot.on{
+  background:var(--grn);
+  box-shadow:0 0 0 4px rgba(15,118,110,.12);
+}
+
+.cloud-dot.busy{
+  background:var(--amb);
+  box-shadow:0 0 0 4px rgba(217,119,6,.14);
+}
+
+.cloud-copy{
+  margin:9px 0 12px;
+}
+
+.cloud-login{
+  margin-bottom:8px;
+}
+
+.cloud-account{
+  min-height:40px;
+  border:.5px solid var(--bord2);
+  border-radius:var(--r);
+  background:rgba(255,255,255,.78);
+  padding:9px 10px;
+  color:var(--mut);
+  font-size:12px;
+  font-weight:850;
+  margin-bottom:8px;
+}
+
+.cloud-account span{
+  min-width:0;
+  overflow:hidden;
+  text-overflow:ellipsis;
+  white-space:nowrap;
+}
+
+.cloud-full{
+  width:100%;
+  margin-top:8px;
+}
+
+.cloud-status{
+  margin-top:9px;
+  color:var(--mut);
+  font-size:12px;
+  font-weight:800;
+  line-height:1.35;
 }
 
 .toast{

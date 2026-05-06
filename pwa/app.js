@@ -1,5 +1,8 @@
 const STORAGE_KEY = "budget_tracker_pwa_v1"
 const ROLLOVER_START_KEY = "2026-4"
+const SUPABASE_URL = "https://yafcgilvulnbczaizcbf.supabase.co"
+const SUPABASE_PUBLISHABLE_KEY = "sb_publishable_xVtese4jTfZsAkB2cgSkOw_b8Wl5ksT"
+const CLOUD_SYNC_DELAY = 900
 
 const DEFAULT_BUDGETS = [
   { id: "cafe", label: "Cafés", icon: "☕", budget: 50, color: "#F59E0B" },
@@ -19,6 +22,10 @@ const appEl = document.getElementById("app")
 const modalEl = document.getElementById("modal")
 const toastEl = document.getElementById("toast")
 
+let supabaseClient = null
+let cloudSaveTimer = null
+let cloudSyncPromise = null
+
 const app = {
   data: loadData(),
   key: monthKey(),
@@ -33,18 +40,25 @@ const app = {
   newPresetCat: null,
   newWishCat: null,
   installPrompt: null,
+  cloudUser: null,
+  cloudEmail: "",
+  cloudReady: false,
+  cloudBusy: false,
+  cloudStatus: "Nube sin conectar",
+  lastCloudSyncAt: null,
   drafts: {
     add: { amt: "", desc: "" },
     category: { icon: "", label: "", budget: "" },
     preset: { icon: "", desc: "", amt: "" },
     wish: { icon: "", desc: "", amt: "" },
     edit: { desc: "", amt: "" },
-    wishEdit: { icon: "", desc: "", amt: "" }
+    wishEdit: { icon: "", desc: "", amt: "" },
+    cloud: { email: "" }
   }
 }
 
 markActiveMonth(app.data, app.key)
-saveData(app.data)
+saveData(app.data, { touch: false, sync: false })
 
 function clone(value) {
   return JSON.parse(JSON.stringify(value))
@@ -199,10 +213,245 @@ function loadData() {
   }
 }
 
-function saveData(data) {
+function saveData(data, options = {}) {
+  const touch = options.touch !== false
+  const sync = options.sync !== false
   const shaped = ensureDataShape(data)
-  shaped._settings._meta.lastSaved = Date.now()
+  if (touch) shaped._settings._meta.lastSaved = Date.now()
   localStorage.setItem(STORAGE_KEY, JSON.stringify(shaped))
+  if (sync) scheduleCloudSave()
+}
+
+function getSavedAt(data) {
+  return Number(data?._settings?._meta?.lastSaved) || 0
+}
+
+function refreshCloudSurface() {
+  if (app.modal === "data") renderModal()
+}
+
+function setCloudStatus(message, busy) {
+  app.cloudStatus = message
+  if (typeof busy === "boolean") app.cloudBusy = busy
+  refreshCloudSurface()
+}
+
+function getAuthRedirectUrl() {
+  if (window.location.protocol === "file:") {
+    return "https://ezratawachi.github.io/scriptable-budget-tracker/pwa/"
+  }
+
+  const url = new URL(window.location.href)
+  url.hash = ""
+  url.search = ""
+  return url.toString()
+}
+
+function cloudErrorMessage(error) {
+  const message = error && error.message ? String(error.message) : "No se pudo conectar con Supabase"
+  return message.length > 110 ? message.slice(0, 107) + "..." : message
+}
+
+function applyCloudSession(session) {
+  const user = session && session.user ? session.user : null
+  app.cloudUser = user
+  app.cloudEmail = user ? (user.email || "") : ""
+
+  if (!user) {
+    clearTimeout(cloudSaveTimer)
+    app.cloudReady = false
+    app.cloudBusy = false
+    app.lastCloudSyncAt = null
+    app.cloudStatus = "Conecta tu email para guardar en Supabase"
+  } else if (!app.cloudStatus || app.cloudStatus === "Nube sin conectar") {
+    app.cloudStatus = "Conectando con tu nube..."
+  }
+}
+
+function scheduleCloudSave() {
+  if (!supabaseClient || !app.cloudUser || !app.cloudReady) return
+  clearTimeout(cloudSaveTimer)
+  app.cloudStatus = "Cambios pendientes por subir"
+  refreshCloudSurface()
+  cloudSaveTimer = setTimeout(() => {
+    pushCloudData({ silent: true })
+  }, CLOUD_SYNC_DELAY)
+}
+
+function startCloudSync(options = {}) {
+  if (cloudSyncPromise) return cloudSyncPromise
+  cloudSyncPromise = pullCloudData(options).finally(() => {
+    cloudSyncPromise = null
+  })
+  return cloudSyncPromise
+}
+
+async function initCloud() {
+  if (!window.supabase || typeof window.supabase.createClient !== "function") {
+    app.cloudStatus = "Supabase no cargó; la app sigue guardando local"
+    render()
+    return
+  }
+
+  supabaseClient = window.supabase.createClient(SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY, {
+    auth: {
+      persistSession: true,
+      autoRefreshToken: true,
+      detectSessionInUrl: true
+    }
+  })
+
+  supabaseClient.auth.onAuthStateChange((_event, session) => {
+    applyCloudSession(session)
+    if (session && session.user) {
+      startCloudSync({ preferNewer: true, silent: true })
+    } else {
+      render()
+    }
+  })
+
+  try {
+    const { data, error } = await supabaseClient.auth.getSession()
+    if (error) throw error
+    applyCloudSession(data.session)
+    if (data.session && data.session.user) {
+      await startCloudSync({ preferNewer: true, silent: true })
+    } else {
+      render()
+    }
+  } catch (error) {
+    app.cloudStatus = cloudErrorMessage(error)
+    app.cloudBusy = false
+    render()
+  }
+}
+
+async function sendMagicLink() {
+  if (!supabaseClient) {
+    toast("Supabase no está listo")
+    return
+  }
+
+  const field = document.getElementById("cloud-email")
+  const email = String((field && field.value) || app.drafts.cloud.email || "").trim().toLowerCase()
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+    toast("Escribe un email válido")
+    return
+  }
+
+  app.drafts.cloud.email = email
+  setCloudStatus("Enviando magic link...", true)
+
+  try {
+    const { error } = await supabaseClient.auth.signInWithOtp({
+      email,
+      options: {
+        emailRedirectTo: getAuthRedirectUrl(),
+        shouldCreateUser: true
+      }
+    })
+    if (error) throw error
+    setCloudStatus("Magic link enviado. Ábrelo en este mismo dispositivo.", false)
+    toast("✓ Revisa tu email")
+  } catch (error) {
+    setCloudStatus(cloudErrorMessage(error), false)
+    toast("No se pudo enviar")
+  }
+}
+
+async function signOutCloud() {
+  if (!supabaseClient) return
+  setCloudStatus("Cerrando sesión...", true)
+  await supabaseClient.auth.signOut().catch(() => null)
+  applyCloudSession(null)
+  render()
+  toast("Sesión cerrada")
+}
+
+async function pushCloudData(options = {}) {
+  const silent = !!options.silent
+  if (!supabaseClient || !app.cloudUser) {
+    if (!silent) toast("Conecta la nube primero")
+    return false
+  }
+
+  clearTimeout(cloudSaveTimer)
+  setCloudStatus("Subiendo cambios a Supabase...", true)
+
+  try {
+    const payload = ensureDataShape(clone(app.data))
+    if (!payload._settings._meta.lastSaved) payload._settings._meta.lastSaved = Date.now()
+
+    const { error } = await supabaseClient
+      .from("budget_sync")
+      .upsert({ user_id: app.cloudUser.id, data: payload }, { onConflict: "user_id" })
+
+    if (error) throw error
+
+    app.cloudReady = true
+    app.lastCloudSyncAt = Date.now()
+    setCloudStatus("Nube al día", false)
+    if (!silent) toast("✓ Guardado en la nube")
+    return true
+  } catch (error) {
+    setCloudStatus(cloudErrorMessage(error), false)
+    if (!silent) toast("No se pudo subir")
+    return false
+  }
+}
+
+async function pullCloudData(options = {}) {
+  const preferNewer = !!options.preferNewer
+  const silent = !!options.silent
+  if (!supabaseClient || !app.cloudUser) {
+    if (!silent) toast("Conecta la nube primero")
+    return false
+  }
+
+  setCloudStatus("Leyendo Supabase...", true)
+
+  try {
+    const { data: row, error } = await supabaseClient
+      .from("budget_sync")
+      .select("data, updated_at")
+      .eq("user_id", app.cloudUser.id)
+      .maybeSingle()
+
+    if (error) throw error
+
+    if (!row || !row.data) {
+      app.cloudReady = true
+      const uploaded = await pushCloudData({ silent: true })
+      if (uploaded && !silent) toast("✓ Data actual importada a la nube")
+      return uploaded
+    }
+
+    const remoteData = ensureDataShape(clone(row.data))
+    const remoteSavedAt = Math.max(getSavedAt(remoteData), Date.parse(row.updated_at) || 0)
+    const localSavedAt = getSavedAt(app.data)
+
+    if (preferNewer && localSavedAt > remoteSavedAt + 1000) {
+      app.cloudReady = true
+      setCloudStatus("Tu data local es más reciente; subiendo...", true)
+      const uploaded = await pushCloudData({ silent: true })
+      if (uploaded && !silent) toast("✓ Nube actualizada")
+      return uploaded
+    }
+
+    app.data = remoteData
+    markActiveMonth(app.data, app.key)
+    saveData(app.data, { touch: false, sync: false })
+    app.cloudReady = true
+    app.lastCloudSyncAt = Date.now()
+    setCloudStatus("Nube descargada y lista", false)
+    render()
+    if (!silent) toast("✓ Data de nube cargada")
+    return true
+  } catch (error) {
+    setCloudStatus(cloudErrorMessage(error), false)
+    if (!silent) toast("No se pudo bajar")
+    return false
+  }
 }
 
 function monthKey(date = new Date()) {
@@ -524,10 +773,13 @@ function renderHome() {
   const installButton = app.installPrompt
     ? `<button class="top-btn icon-btn" title="Instalar" aria-label="Instalar" data-action="install">⇩</button>`
     : ""
+  const cloudTitle = app.cloudUser ? "Nube conectada" : "Conectar nube"
+  const cloudButton = `<button class="top-btn icon-btn cloud-btn ${app.cloudUser ? "online" : ""} ${app.cloudBusy ? "syncing" : ""}" title="${cloudTitle}" aria-label="${cloudTitle}" data-action="openData">☁</button>`
 
   return `
     <section class="view">
       ${header("Presupuesto", monthLabel(app.key), `
+        ${cloudButton}
         ${installButton}
         <button class="top-btn icon-btn" title="Wishlist" aria-label="Wishlist" data-action="go" data-view="wishes">♡</button>
         <button class="top-btn icon-btn" title="Categorías" aria-label="Categorías" data-action="go" data-view="cats">◎</button>
@@ -1002,6 +1254,26 @@ function renderDataModal() {
   const monthCount = getTrackedMonthKeys(app.data).length
   const txCount = getTrackedMonthKeys(app.data).reduce((sum, key) => sum + (Array.isArray(app.data[key]) ? app.data[key].length : 0), 0)
   const saved = app.data._settings._meta.lastSaved ? new Date(app.data._settings._meta.lastSaved).toLocaleString("es-MX") : "aún sin guardar"
+  const cloudSaved = app.lastCloudSyncAt ? new Date(app.lastCloudSyncAt).toLocaleString("es-MX") : "pendiente"
+  const cloudMode = app.cloudUser
+    ? `
+      <div class="cloud-account">
+        <span>${esc(app.cloudEmail || "Sesión activa")}</span>
+        <span>${esc(cloudSaved)}</span>
+      </div>
+      <div class="sheet-actions">
+        <button class="secondary-btn" data-action="cloudPull" ${app.cloudBusy ? "disabled" : ""}>Bajar nube</button>
+        <button class="primary-btn" data-action="cloudPush" ${app.cloudBusy ? "disabled" : ""}>Subir ahora</button>
+      </div>
+      <button class="danger-btn cloud-full" data-action="cloudSignOut" ${app.cloudBusy ? "disabled" : ""}>Cerrar sesión</button>
+    `
+    : `
+      <div class="field-group cloud-login">
+        <div class="field-label">Email</div>
+        <input class="field" id="cloud-email" type="email" inputmode="email" autocomplete="email" autocapitalize="off" spellcheck="false" placeholder="tu@email.com" value="${attr(app.drafts.cloud.email)}">
+      </div>
+      <button class="primary-btn" data-action="cloudLogin" ${app.cloudBusy ? "disabled" : ""}>Enviar magic link</button>
+    `
 
   return `
     <div class="sheet" role="dialog" aria-modal="true" aria-label="Datos y respaldo">
@@ -1011,6 +1283,20 @@ function renderDataModal() {
       </div>
       <div class="data-note">
         Guardado local en este navegador · ${monthCount} meses · ${txCount} movimientos · último guardado ${esc(saved)}.
+      </div>
+      <div class="cloud-panel ${app.cloudUser ? "connected" : ""}">
+        <div class="cloud-head">
+          <div>
+            <div class="cloud-kicker">Supabase</div>
+            <div class="cloud-title">${app.cloudUser ? "Sync automática activa" : "Guardar en la nube"}</div>
+          </div>
+          <span class="cloud-dot ${app.cloudBusy ? "busy" : app.cloudUser ? "on" : ""}"></span>
+        </div>
+        <div class="data-note cloud-copy">
+          ${app.cloudUser ? "Los cambios se suben solos después de guardarlos. También puedes forzar subir o bajar aquí." : "Te mando un magic link por email; al entrar, tu data actual se importa a Supabase automáticamente."}
+        </div>
+        ${cloudMode}
+        <div class="cloud-status">${esc(app.cloudStatus)}</div>
       </div>
       <div class="data-grid">
         <button class="secondary-btn" data-action="exportJSON">Exportar JSON completo</button>
@@ -1102,6 +1388,8 @@ function handleInput(event) {
   if (target.id === "wish-edit-icon") app.drafts.wishEdit.icon = target.value
   if (target.id === "wish-edit-desc") app.drafts.wishEdit.desc = target.value
   if (target.id === "wish-edit-amt") app.drafts.wishEdit.amt = target.value
+
+  if (target.id === "cloud-email") app.drafts.cloud.email = target.value
 }
 
 function handleClick(event) {
@@ -1146,6 +1434,10 @@ function handleClick(event) {
   if (action === "exportJSON") exportJSON()
   if (action === "exportCSV") exportCSV()
   if (action === "importJSON") importJSON()
+  if (action === "cloudLogin") sendMagicLink()
+  if (action === "cloudPush") pushCloudData()
+  if (action === "cloudPull" && confirm("Esto reemplazará esta copia local con lo que esté en Supabase.")) pullCloudData()
+  if (action === "cloudSignOut") signOutCloud()
   if (action === "install") installPWA()
   if (action === "closeModal") closeModal()
 }
@@ -1591,3 +1883,4 @@ if ("serviceWorker" in navigator) {
 }
 
 render()
+initCloud()
