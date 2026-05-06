@@ -25,13 +25,13 @@ Opciones recomendadas para publicarla:
 
 ## Sobre guardado en la nube
 
-La app guarda primero localmente para que funcione offline, y además sincroniza con Supabase cuando inicias sesión por magic link.
+La app guarda primero localmente para que funcione offline, y además sincroniza con Supabase cuando inicias sesión con código por email.
 
 Proyecto conectado:
 
 1. Supabase project: `budget-tracker`.
 2. Tabla: `public.budget_sync`.
-3. Auth: magic link por email.
+3. Auth: código OTP por email.
 4. PWA publicada: `https://ezratawachi.github.io/scriptable-budget-tracker/pwa/`.
 
 Al conectar el email por primera vez, la PWA sube tu data actual a Supabase si todavía no existe una copia en la nube. Después de eso, cada gasto, categoría, preset o deseo se sube automáticamente.

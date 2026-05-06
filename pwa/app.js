@@ -53,7 +53,7 @@ const app = {
     wish: { icon: "", desc: "", amt: "" },
     edit: { desc: "", amt: "" },
     wishEdit: { icon: "", desc: "", amt: "" },
-    cloud: { email: "" }
+    cloud: { email: "", code: "", codeSent: false }
   }
 }
 
@@ -236,17 +236,6 @@ function setCloudStatus(message, busy) {
   refreshCloudSurface()
 }
 
-function getAuthRedirectUrl() {
-  if (window.location.protocol === "file:") {
-    return "https://ezratawachi.github.io/scriptable-budget-tracker/pwa/"
-  }
-
-  const url = new URL(window.location.href)
-  url.hash = ""
-  url.search = ""
-  return url.toString()
-}
-
 function cloudErrorMessage(error) {
   const message = error && error.message ? String(error.message) : "No se pudo conectar con Supabase"
   return message.length > 110 ? message.slice(0, 107) + "..." : message
@@ -326,7 +315,7 @@ async function initCloud() {
   }
 }
 
-async function sendMagicLink() {
+async function sendEmailCode() {
   if (!supabaseClient) {
     toast("Supabase no está listo")
     return
@@ -340,22 +329,64 @@ async function sendMagicLink() {
   }
 
   app.drafts.cloud.email = email
-  setCloudStatus("Enviando magic link...", true)
+  setCloudStatus("Enviando código por email...", true)
 
   try {
     const { error } = await supabaseClient.auth.signInWithOtp({
       email,
       options: {
-        emailRedirectTo: getAuthRedirectUrl(),
         shouldCreateUser: true
       }
     })
     if (error) throw error
-    setCloudStatus("Magic link enviado. Ábrelo en este mismo dispositivo.", false)
+    app.drafts.cloud.codeSent = true
+    app.drafts.cloud.code = ""
+    setCloudStatus("Código enviado. Escríbelo aquí sin salir de la app.", false)
     toast("✓ Revisa tu email")
   } catch (error) {
     setCloudStatus(cloudErrorMessage(error), false)
     toast("No se pudo enviar")
+  }
+}
+
+async function verifyEmailCode() {
+  if (!supabaseClient) {
+    toast("Supabase no está listo")
+    return
+  }
+
+  const email = String(app.drafts.cloud.email || "").trim().toLowerCase()
+  const code = String(app.drafts.cloud.code || "").replace(/\D/g, "")
+
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+    toast("Escribe tu email primero")
+    return
+  }
+
+  if (code.length < 6) {
+    toast("El código tiene 6 dígitos")
+    return
+  }
+
+  setCloudStatus("Verificando código...", true)
+
+  try {
+    const { data, error } = await supabaseClient.auth.verifyOtp({
+      email,
+      token: code,
+      type: "email"
+    })
+    if (error) throw error
+    applyCloudSession(data.session)
+    app.drafts.cloud.codeSent = false
+    app.drafts.cloud.code = ""
+    await startCloudSync({ preferNewer: true, silent: true })
+    setCloudStatus("Nube conectada", false)
+    render()
+    toast("✓ Nube conectada")
+  } catch (error) {
+    setCloudStatus(cloudErrorMessage(error), false)
+    toast("Código inválido")
   }
 }
 
@@ -1272,7 +1303,18 @@ function renderDataModal() {
         <div class="field-label">Email</div>
         <input class="field" id="cloud-email" type="email" inputmode="email" autocomplete="email" autocapitalize="off" spellcheck="false" placeholder="tu@email.com" value="${attr(app.drafts.cloud.email)}">
       </div>
-      <button class="primary-btn" data-action="cloudLogin" ${app.cloudBusy ? "disabled" : ""}>Enviar magic link</button>
+      ${app.drafts.cloud.codeSent ? `
+        <div class="field-group cloud-login">
+          <div class="field-label">Código</div>
+          <input class="field code-field" id="cloud-code" type="text" inputmode="numeric" autocomplete="one-time-code" maxlength="6" placeholder="000000" value="${attr(app.drafts.cloud.code)}">
+        </div>
+        <div class="sheet-actions">
+          <button class="secondary-btn" data-action="cloudLogin" ${app.cloudBusy ? "disabled" : ""}>Reenviar</button>
+          <button class="primary-btn" data-action="cloudVerify" ${app.cloudBusy ? "disabled" : ""}>Verificar</button>
+        </div>
+      ` : `
+        <button class="primary-btn" data-action="cloudLogin" ${app.cloudBusy ? "disabled" : ""}>Enviar código</button>
+      `}
     `
 
   return `
@@ -1293,7 +1335,7 @@ function renderDataModal() {
           <span class="cloud-dot ${app.cloudBusy ? "busy" : app.cloudUser ? "on" : ""}"></span>
         </div>
         <div class="data-note cloud-copy">
-          ${app.cloudUser ? "Los cambios se suben solos después de guardarlos. También puedes forzar subir o bajar aquí." : "Te mando un magic link por email; al entrar, tu data actual se importa a Supabase automáticamente."}
+          ${app.cloudUser ? "Los cambios se suben solos después de guardarlos. También puedes forzar subir o bajar aquí." : "Te mando un código por email. Escríbelo aquí para que la sesión quede dentro de la PWA instalada."}
         </div>
         ${cloudMode}
         <div class="cloud-status">${esc(app.cloudStatus)}</div>
@@ -1390,6 +1432,11 @@ function handleInput(event) {
   if (target.id === "wish-edit-amt") app.drafts.wishEdit.amt = target.value
 
   if (target.id === "cloud-email") app.drafts.cloud.email = target.value
+  if (target.id === "cloud-code") {
+    const code = target.value.replace(/\D/g, "").slice(0, 6)
+    app.drafts.cloud.code = code
+    target.value = code
+  }
 }
 
 function handleClick(event) {
@@ -1434,7 +1481,8 @@ function handleClick(event) {
   if (action === "exportJSON") exportJSON()
   if (action === "exportCSV") exportCSV()
   if (action === "importJSON") importJSON()
-  if (action === "cloudLogin") sendMagicLink()
+  if (action === "cloudLogin") sendEmailCode()
+  if (action === "cloudVerify") verifyEmailCode()
   if (action === "cloudPush") pushCloudData()
   if (action === "cloudPull" && confirm("Esto reemplazará esta copia local con lo que esté en Supabase.")) pullCloudData()
   if (action === "cloudSignOut") signOutCloud()
