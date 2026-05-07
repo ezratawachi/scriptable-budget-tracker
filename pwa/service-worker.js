@@ -1,4 +1,4 @@
-const CACHE_NAME = "budget-pwa-v6"
+const CACHE_NAME = "budget-pwa-v7"
 const ASSETS = [
   "./",
   "./index.html",
@@ -43,6 +43,19 @@ self.addEventListener("fetch", event => {
   const url = new URL(request.url)
 
   if (request.method !== "GET" || url.origin !== self.location.origin) return
+
+  if (request.mode === "navigate") {
+    event.respondWith(
+      fetch(request)
+        .then(response => {
+          const copy = response.clone()
+          caches.open(CACHE_NAME).then(cache => cache.put("./index.html", copy))
+          return response
+        })
+        .catch(() => caches.match("./index.html"))
+    )
+    return
+  }
 
   event.respondWith(
     caches.match(request).then(cached => {

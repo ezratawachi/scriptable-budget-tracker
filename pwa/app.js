@@ -2120,6 +2120,13 @@ document.addEventListener("input", handleInput)
 document.addEventListener("click", handleClick)
 
 if ("serviceWorker" in navigator) {
+  let refreshingForUpdate = false
+  navigator.serviceWorker.addEventListener("controllerchange", () => {
+    if (refreshingForUpdate) return
+    refreshingForUpdate = true
+    window.location.reload()
+  })
+
   window.addEventListener("load", () => {
     navigator.serviceWorker.register("./service-worker.js").catch(() => {})
   })
