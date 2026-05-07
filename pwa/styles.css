@@ -1108,6 +1108,29 @@ button:disabled{
   justify-content:center;
 }
 
+.reset-card{
+  border:.5px solid rgba(15,118,110,.18);
+  border-radius:var(--r);
+  background:var(--acc2);
+  color:var(--txt);
+  padding:12px;
+  margin-bottom:8px;
+}
+
+.reset-title{
+  color:var(--acc);
+  font-size:13px;
+  font-weight:900;
+}
+
+.reset-copy{
+  margin-top:4px;
+  color:var(--mut);
+  font-size:12px;
+  font-weight:750;
+  line-height:1.35;
+}
+
 .backup-panel{
   background:linear-gradient(180deg,#FFFFFF 0%,#F8FBFA 100%);
 }

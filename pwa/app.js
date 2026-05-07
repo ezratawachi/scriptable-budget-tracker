@@ -55,6 +55,7 @@ const app = {
   cloudBusy: false,
   cloudStatus: "Sign in to keep your data backed up",
   lastCloudSyncAt: null,
+  recoveringPassword: false,
   drafts: {
     add: { amt: "", desc: "" },
     category: { icon: "", label: "", budget: "" },
@@ -64,7 +65,7 @@ const app = {
     budgetEdit: { icon: "", label: "", budget: "" },
     edit: { desc: "", amt: "" },
     wishEdit: { icon: "", desc: "", amt: "" },
-    cloud: { email: "", password: "", code: "", codeSent: false, mode: "signin", resetSent: false }
+    cloud: { email: "", password: "", code: "", codeSent: false, mode: "signin", resetSent: false, newPassword: "", confirmPassword: "" }
   }
 }
 
@@ -306,7 +307,16 @@ async function initCloud() {
     }
   })
 
-  supabaseClient.auth.onAuthStateChange((_event, session) => {
+  supabaseClient.auth.onAuthStateChange((event, session) => {
+    if (event === "PASSWORD_RECOVERY") {
+      app.recoveringPassword = true
+      app.view = "account"
+      app.drafts.cloud.mode = "signin"
+      app.drafts.cloud.password = ""
+      app.drafts.cloud.newPassword = ""
+      app.drafts.cloud.confirmPassword = ""
+    }
+
     applyCloudSession(session)
     if (session && session.user) {
       startCloudSync({ preferNewer: true, silent: true })
@@ -510,7 +520,7 @@ async function sendPasswordReset() {
   setCloudStatus("Sending reset email...", true)
 
   try {
-    const redirectTo = window.location.href.split("#")[0]
+    const redirectTo = appBaseUrl()
     const { error } = await supabaseClient.auth.resetPasswordForEmail(email, { redirectTo })
     if (error) throw error
     app.drafts.cloud.resetSent = true
@@ -523,6 +533,57 @@ async function sendPasswordReset() {
   }
 }
 
+function appBaseUrl() {
+  const url = new URL(window.location.href)
+  url.search = ""
+  url.hash = ""
+  return url.href
+}
+
+async function updateRecoveredPassword() {
+  if (!supabaseClient || !app.cloudUser) {
+    toast("Open the reset link again")
+    return
+  }
+
+  const password = String(app.drafts.cloud.newPassword || "")
+  const confirmPassword = String(app.drafts.cloud.confirmPassword || "")
+  if (password.length < 6) {
+    toast("Use at least 6 characters")
+    return
+  }
+
+  if (password !== confirmPassword) {
+    toast("Passwords do not match")
+    return
+  }
+
+  setCloudStatus("Updating password...", true)
+
+  try {
+    const { error } = await supabaseClient.auth.updateUser({ password })
+    if (error) throw error
+    app.recoveringPassword = false
+    app.drafts.cloud.newPassword = ""
+    app.drafts.cloud.confirmPassword = ""
+    app.drafts.cloud.password = ""
+    app.drafts.cloud.resetSent = false
+    setCloudStatus("Password updated", false)
+    render()
+    haptic("success")
+    toast("Password updated")
+  } catch (error) {
+    setCloudStatus(cloudErrorMessage(error), false)
+    toast("Could not update password")
+  }
+}
+
+function canUpdateRecoveredPassword() {
+  const password = String(app.drafts.cloud.newPassword || "")
+  const confirmPassword = String(app.drafts.cloud.confirmPassword || "")
+  return password.length >= 6 && confirmPassword.length >= 6 && password === confirmPassword
+}
+
 async function signOutCloud() {
   if (!supabaseClient) return
   setCloudStatus("Signing out...", true)
@@ -532,6 +593,10 @@ async function signOutCloud() {
   app.drafts.cloud.code = ""
   app.drafts.cloud.codeSent = false
   app.drafts.cloud.mode = "signin"
+  app.drafts.cloud.resetSent = false
+  app.drafts.cloud.newPassword = ""
+  app.drafts.cloud.confirmPassword = ""
+  app.recoveringPassword = false
   render()
   haptic("medium")
   toast("Signed out")
@@ -1478,11 +1543,30 @@ function renderCloudPanel() {
   const summary = getDataSummary()
   const mode = app.drafts.cloud.mode || "signin"
   const signedIn = !!app.cloudUser
-  const statusTitle = app.cloudBusy ? "Syncing..." : signedIn ? "Backup is on" : "Sign in to back up"
-  const statusCopy = signedIn
+  const recovering = app.recoveringPassword && signedIn
+  const recoveryStarted = !!(app.drafts.cloud.newPassword || app.drafts.cloud.confirmPassword)
+  const recoveryHint = canUpdateRecoveredPassword() ? "Ready to save." : recoveryStarted ? "Passwords must match and be at least 6 characters." : "Use at least 6 characters."
+  const statusTitle = recovering ? "Set a new password" : app.cloudBusy ? "Syncing..." : signedIn ? "Backup is on" : mode === "reset" ? "Reset password" : "Sign in to back up"
+  const statusCopy = recovering
+    ? "Choose a new password to finish securing your account."
+    : signedIn
     ? (app.cloudBusy ? "Saving your latest changes..." : `Last synced ${esc(summary.cloudSaved)}`)
+    : mode === "reset"
+    ? "Enter your email and we will send a secure reset link."
     : "Your budget stays on this device until you sign in."
-  const cloudMode = signedIn
+  const cloudMode = recovering
+    ? `
+      <div class="field-group cloud-login">
+        <div class="field-label">New password</div>
+        <input class="field" id="cloud-new-password" type="password" autocomplete="new-password" placeholder="New password" value="${attr(app.drafts.cloud.newPassword)}">
+      </div>
+      <div class="field-group cloud-login">
+        <div class="field-label">Confirm password</div>
+        <input class="field" id="cloud-confirm-password" type="password" autocomplete="new-password" placeholder="Confirm password" value="${attr(app.drafts.cloud.confirmPassword)}">
+      </div>
+      <button class="primary-btn" id="update-password-btn" data-action="cloudUpdatePassword" ${app.cloudBusy || !canUpdateRecoveredPassword() ? "disabled" : ""}>${icon("check")} Save Password</button>
+    `
+    : signedIn
     ? `
       <div class="cloud-account backup-account">
         <span>${esc(app.cloudEmail || "Signed in")}</span>
@@ -1491,7 +1575,7 @@ function renderCloudPanel() {
       <button class="danger-btn cloud-full" data-action="cloudSignOut" ${app.cloudBusy ? "disabled" : ""}>${icon("account")} Sign Out</button>
     `
     : `
-      ${mode === "code" ? "" : `
+      ${mode === "code" || mode === "reset" ? "" : `
         <div class="auth-tabs" role="group" aria-label="Account mode">
           <button class="${mode === "signin" ? "active" : ""}" data-action="setAuthMode" data-mode="signin">Sign in</button>
           <button class="${mode === "signup" ? "active" : ""}" data-action="setAuthMode" data-mode="signup">Create</button>
@@ -1501,7 +1585,16 @@ function renderCloudPanel() {
         <div class="field-label">Email</div>
         <input class="field" id="cloud-email" type="email" inputmode="email" autocomplete="email" autocapitalize="off" spellcheck="false" placeholder="you@email.com" value="${attr(app.drafts.cloud.email)}">
       </div>
-      ${mode === "code" && app.drafts.cloud.codeSent ? `
+      ${mode === "reset" && app.drafts.cloud.resetSent ? `
+        <div class="reset-card">
+          <div class="reset-title">Check your email</div>
+          <div class="reset-copy">We sent a reset link to ${esc(app.drafts.cloud.email)}. Open it to choose a new password, then come back here and sign in.</div>
+        </div>
+        <button class="secondary-btn cloud-full" data-action="setAuthMode" data-mode="signin">Back to Sign In</button>
+      ` : mode === "reset" ? `
+        <button class="primary-btn" id="send-reset-link" data-action="cloudResetPassword" ${app.cloudBusy || !isValidEmail(app.drafts.cloud.email) ? "disabled" : ""}>${icon("check")} Send Reset Link</button>
+        <button class="text-btn auth-link" data-action="setAuthMode" data-mode="signin">Back to Sign In</button>
+      ` : mode === "code" && app.drafts.cloud.codeSent ? `
         <div class="field-group cloud-login">
           <div class="field-label">Code</div>
           <input class="field code-field" id="cloud-code" type="text" inputmode="numeric" autocomplete="one-time-code" maxlength="6" placeholder="000000" value="${attr(app.drafts.cloud.code)}">
@@ -1523,11 +1616,10 @@ function renderCloudPanel() {
           <button class="primary-btn" data-action="cloudLogin" ${app.cloudBusy ? "disabled" : ""}>${icon("check")} Send Code</button>
         ` : `
           <button class="primary-btn" data-action="cloudPasswordLogin" ${app.cloudBusy ? "disabled" : ""}>${icon("check")} Sign In</button>
-          <button class="text-btn auth-link" data-action="cloudResetPassword">Forgot password?</button>
+          <button class="text-btn auth-link" data-action="setAuthMode" data-mode="reset">Forgot password?</button>
         `}
       `}
-      ${app.drafts.cloud.resetSent ? `<div class="cloud-status">Password reset email sent.</div>` : ""}
-      <button class="text-btn auth-link" data-action="setAuthMode" data-mode="${mode === "code" ? "signin" : "code"}">${mode === "code" ? "Use password instead" : "Use email code instead"}</button>
+      ${mode === "reset" ? "" : `<button class="text-btn auth-link" data-action="setAuthMode" data-mode="${mode === "code" ? "signin" : "code"}">${mode === "code" ? "Use password instead" : "Use email code instead"}</button>`}
     `
 
   return `
@@ -1543,7 +1635,15 @@ function renderCloudPanel() {
         ${statusCopy}
       </div>
       ${cloudMode}
-      <div class="cloud-status">${signedIn ? "Everything saves automatically." : esc(app.cloudStatus)}</div>
+      <div class="cloud-status">${
+        recovering
+          ? recoveryHint
+          : signedIn
+          ? "Everything saves automatically."
+          : mode === "reset"
+          ? app.drafts.cloud.resetSent ? "Use this same device if you can." : "For security, we only send a link if this email has an account."
+          : esc(app.cloudStatus)
+      }</div>
     </div>
   `
 }
@@ -1935,8 +2035,16 @@ function handleInput(event) {
   if (target.id === "wish-edit-desc") app.drafts.wishEdit.desc = target.value
   if (target.id === "wish-edit-amt") app.drafts.wishEdit.amt = target.value
 
-  if (target.id === "cloud-email") app.drafts.cloud.email = target.value
+  if (target.id === "cloud-email") {
+    app.drafts.cloud.email = target.value
+    updateButtonState("send-reset-link", isValidEmail(app.drafts.cloud.email))
+  }
   if (target.id === "cloud-password") app.drafts.cloud.password = target.value
+  if (target.id === "cloud-new-password") app.drafts.cloud.newPassword = target.value
+  if (target.id === "cloud-confirm-password") app.drafts.cloud.confirmPassword = target.value
+  if (["cloud-new-password", "cloud-confirm-password"].includes(target.id)) {
+    updateButtonState("update-password-btn", canUpdateRecoveredPassword())
+  }
   if (target.id === "cloud-code") {
     const code = target.value.replace(/\D/g, "").slice(0, 6)
     app.drafts.cloud.code = code
@@ -2011,6 +2119,7 @@ function handleClick(event) {
   if (action === "cloudPasswordLogin") signInWithPassword()
   if (action === "cloudCreateAccount") createPasswordAccount()
   if (action === "cloudResetPassword") sendPasswordReset()
+  if (action === "cloudUpdatePassword") updateRecoveredPassword()
   if (action === "cloudLogin") sendEmailCode()
   if (action === "cloudVerify") verifyEmailCode()
   if (action === "cloudPush") pushCloudData()
@@ -2084,9 +2193,12 @@ function chooseCat(id) {
 }
 
 function setAuthMode(mode) {
-  app.drafts.cloud.mode = ["signin", "signup", "code"].includes(mode) ? mode : "signin"
+  app.drafts.cloud.mode = ["signin", "signup", "code", "reset"].includes(mode) ? mode : "signin"
   app.drafts.cloud.codeSent = false
   app.drafts.cloud.resetSent = false
+  app.drafts.cloud.password = ""
+  app.drafts.cloud.newPassword = ""
+  app.drafts.cloud.confirmPassword = ""
   render()
 }
 
