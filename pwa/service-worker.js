@@ -1,4 +1,4 @@
-const CACHE_NAME = "budget-pwa-v8"
+const CACHE_NAME = "budget-pwa-v9"
 const ASSETS = [
   "./",
   "./index.html",

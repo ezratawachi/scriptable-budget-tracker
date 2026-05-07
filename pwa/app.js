@@ -1014,12 +1014,12 @@ function iconPickerValue(target) {
   return "✨"
 }
 
-function iconPickerButton(target, label = "Choose icon") {
+function iconPickerButton(target) {
   const value = iconPickerValue(target)
   return `
-    <button class="icon-picker-btn" type="button" data-action="openIconPicker" data-target="${attr(target)}">
+    <button class="icon-picker-btn" type="button" aria-label="Change icon" title="Change icon" data-action="openIconPicker" data-target="${attr(target)}">
       <span class="icon-picker-preview">${esc(value)}</span>
-      <span>${esc(label)}</span>
+      <span class="sr-only">Change icon</span>
     </button>
   `
 }
