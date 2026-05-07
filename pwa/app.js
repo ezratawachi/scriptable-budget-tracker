@@ -5,10 +5,10 @@ const SUPABASE_PUBLISHABLE_KEY = "sb_publishable_xVtese4jTfZsAkB2cgSkOw_b8Wl5ksT
 const CLOUD_SYNC_DELAY = 900
 
 const DEFAULT_BUDGETS = [
-  { id: "cafe", label: "Cafés", icon: "☕", budget: 50, color: "#F59E0B" },
-  { id: "rest", label: "Restaurantes", icon: "🍽", budget: 200, color: "#EF4444" },
+  { id: "cafe", label: "Coffee", icon: "☕", budget: 50, color: "#F59E0B" },
+  { id: "rest", label: "Restaurants", icon: "🍽", budget: 200, color: "#EF4444" },
   { id: "uber", label: "Uber", icon: "🚗", budget: 20, color: "#10B981" },
-  { id: "online", label: "Compras Online", icon: "📦", budget: 100, color: "#2563EB" },
+  { id: "online", label: "Online Shopping", icon: "📦", budget: 100, color: "#2563EB" },
   { id: "growth_lab", label: "Business Experiments", icon: "🧪", budget: 15, color: "#7C3AED" }
 ]
 
@@ -35,6 +35,7 @@ const app = {
   view: "home",
   modal: null,
   selectedCat: null,
+  returnView: null,
   editingEntryId: null,
   editingCat: null,
   editingWishId: null,
@@ -46,7 +47,7 @@ const app = {
   cloudEmail: "",
   cloudReady: false,
   cloudBusy: false,
-  cloudStatus: "Nube sin conectar",
+  cloudStatus: "Cloud not connected",
   lastCloudSyncAt: null,
   drafts: {
     add: { amt: "", desc: "" },
@@ -167,7 +168,7 @@ function ensureDataShape(data) {
     .filter(p => p && p.id && p.desc)
     .map(p => ({
       id: String(p.id),
-      desc: String(p.desc || "Gasto"),
+      desc: String(p.desc || "Expense"),
       amt: Number(p.amt) || 0,
       cat: String(p.cat || ""),
       icon: String(p.icon || "⚡")
@@ -179,7 +180,7 @@ function ensureDataShape(data) {
     .filter(w => w && w.id && w.desc)
     .map(w => ({
       id: String(w.id),
-      desc: String(w.desc || "Deseo"),
+      desc: String(w.desc || "Wish"),
       amt: Number(w.amt) || 0,
       cat: String(w.cat || ""),
       icon: String(w.icon || "✨")
@@ -195,7 +196,7 @@ function ensureDataShape(data) {
     d[key] = Array.isArray(d[key])
       ? d[key].filter(Boolean).map(entry => ({
         id: Number(entry.id) || Date.now() + Math.floor(Math.random() * 1000),
-        desc: String(entry.desc || "Gasto"),
+        desc: String(entry.desc || "Expense"),
         amt: Number(entry.amt) || 0,
         cat: String(entry.cat || ""),
         date: String(entry.date || "")
@@ -229,6 +230,7 @@ function getSavedAt(data) {
 }
 
 function refreshCloudSurface() {
+  if (app.view === "account") render()
   if (app.modal === "data") renderModal()
 }
 
@@ -239,7 +241,7 @@ function setCloudStatus(message, busy) {
 }
 
 function cloudErrorMessage(error) {
-  const message = error && error.message ? String(error.message) : "No se pudo conectar con Supabase"
+  const message = error && error.message ? String(error.message) : "Could not connect to Supabase"
   return message.length > 110 ? message.slice(0, 107) + "..." : message
 }
 
@@ -253,16 +255,16 @@ function applyCloudSession(session) {
     app.cloudReady = false
     app.cloudBusy = false
     app.lastCloudSyncAt = null
-    app.cloudStatus = "Conecta tu email para guardar en Supabase"
-  } else if (!app.cloudStatus || app.cloudStatus === "Nube sin conectar") {
-    app.cloudStatus = "Conectando con tu nube..."
+    app.cloudStatus = "Connect your email to save to Supabase"
+  } else if (!app.cloudStatus || app.cloudStatus === "Cloud not connected") {
+    app.cloudStatus = "Connecting to your cloud..."
   }
 }
 
 function scheduleCloudSave() {
   if (!supabaseClient || !app.cloudUser || !app.cloudReady) return
   clearTimeout(cloudSaveTimer)
-  app.cloudStatus = "Cambios pendientes por subir"
+  app.cloudStatus = "Pending changes to upload"
   refreshCloudSurface()
   cloudSaveTimer = setTimeout(() => {
     pushCloudData({ silent: true })
@@ -279,7 +281,7 @@ function startCloudSync(options = {}) {
 
 async function initCloud() {
   if (!window.supabase || typeof window.supabase.createClient !== "function") {
-    app.cloudStatus = "Supabase no cargó; la app sigue guardando local"
+    app.cloudStatus = "Supabase did not load; the app is still saving locally"
     render()
     return
   }
@@ -319,19 +321,19 @@ async function initCloud() {
 
 async function sendEmailCode() {
   if (!supabaseClient) {
-    toast("Supabase no está listo")
+    toast("Supabase is not ready")
     return
   }
 
   const field = document.getElementById("cloud-email")
   const email = String((field && field.value) || app.drafts.cloud.email || "").trim().toLowerCase()
   if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
-    toast("Escribe un email válido")
+    toast("Enter a valid email")
     return
   }
 
   app.drafts.cloud.email = email
-  setCloudStatus("Enviando código por email...", true)
+  setCloudStatus("Sending email code...", true)
 
   try {
     const { error } = await supabaseClient.auth.signInWithOtp({
@@ -343,17 +345,18 @@ async function sendEmailCode() {
     if (error) throw error
     app.drafts.cloud.codeSent = true
     app.drafts.cloud.code = ""
-    setCloudStatus("Código enviado. Escríbelo aquí sin salir de la app.", false)
-    toast("✓ Revisa tu email")
+    setCloudStatus("Code sent. Type it here without leaving the app.", false)
+    haptic("success")
+    toast("Check your email")
   } catch (error) {
     setCloudStatus(cloudErrorMessage(error), false)
-    toast("No se pudo enviar")
+    toast("Could not send code")
   }
 }
 
 async function verifyEmailCode() {
   if (!supabaseClient) {
-    toast("Supabase no está listo")
+    toast("Supabase is not ready")
     return
   }
 
@@ -361,16 +364,16 @@ async function verifyEmailCode() {
   const code = String(app.drafts.cloud.code || "").replace(/\D/g, "")
 
   if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
-    toast("Escribe tu email primero")
+    toast("Enter your email first")
     return
   }
 
   if (code.length < 6) {
-    toast("El código tiene 6 dígitos")
+    toast("The code has 6 digits")
     return
   }
 
-  setCloudStatus("Verificando código...", true)
+  setCloudStatus("Verifying code...", true)
 
   try {
     const { data, error } = await supabaseClient.auth.verifyOtp({
@@ -383,33 +386,35 @@ async function verifyEmailCode() {
     app.drafts.cloud.codeSent = false
     app.drafts.cloud.code = ""
     await startCloudSync({ preferNewer: true, silent: true })
-    setCloudStatus("Nube conectada", false)
+    setCloudStatus("Cloud connected", false)
     render()
-    toast("✓ Nube conectada")
+    haptic("success")
+    toast("Cloud connected")
   } catch (error) {
     setCloudStatus(cloudErrorMessage(error), false)
-    toast("Código inválido")
+    toast("Invalid code")
   }
 }
 
 async function signOutCloud() {
   if (!supabaseClient) return
-  setCloudStatus("Cerrando sesión...", true)
+  setCloudStatus("Signing out...", true)
   await supabaseClient.auth.signOut().catch(() => null)
   applyCloudSession(null)
   render()
-  toast("Sesión cerrada")
+  haptic("medium")
+  toast("Signed out")
 }
 
 async function pushCloudData(options = {}) {
   const silent = !!options.silent
   if (!supabaseClient || !app.cloudUser) {
-    if (!silent) toast("Conecta la nube primero")
+    if (!silent) toast("Connect cloud first")
     return false
   }
 
   clearTimeout(cloudSaveTimer)
-  setCloudStatus("Subiendo cambios a Supabase...", true)
+  setCloudStatus("Uploading changes to Supabase...", true)
 
   try {
     const payload = ensureDataShape(clone(app.data))
@@ -423,12 +428,13 @@ async function pushCloudData(options = {}) {
 
     app.cloudReady = true
     app.lastCloudSyncAt = Date.now()
-    setCloudStatus("Nube al día", false)
-    if (!silent) toast("✓ Guardado en la nube")
+    setCloudStatus("Cloud is up to date", false)
+    if (!silent) haptic("success")
+    if (!silent) toast("Saved to cloud")
     return true
   } catch (error) {
     setCloudStatus(cloudErrorMessage(error), false)
-    if (!silent) toast("No se pudo subir")
+    if (!silent) toast("Could not upload")
     return false
   }
 }
@@ -437,11 +443,11 @@ async function pullCloudData(options = {}) {
   const preferNewer = !!options.preferNewer
   const silent = !!options.silent
   if (!supabaseClient || !app.cloudUser) {
-    if (!silent) toast("Conecta la nube primero")
+    if (!silent) toast("Connect cloud first")
     return false
   }
 
-  setCloudStatus("Leyendo Supabase...", true)
+  setCloudStatus("Reading Supabase...", true)
 
   try {
     const { data: row, error } = await supabaseClient
@@ -455,7 +461,7 @@ async function pullCloudData(options = {}) {
     if (!row || !row.data) {
       app.cloudReady = true
       const uploaded = await pushCloudData({ silent: true })
-      if (uploaded && !silent) toast("✓ Data actual importada a la nube")
+      if (uploaded && !silent) toast("Current data uploaded to cloud")
       return uploaded
     }
 
@@ -465,9 +471,9 @@ async function pullCloudData(options = {}) {
 
     if (preferNewer && localSavedAt > remoteSavedAt + 1000) {
       app.cloudReady = true
-      setCloudStatus("Tu data local es más reciente; subiendo...", true)
+      setCloudStatus("Your local data is newer; uploading...", true)
       const uploaded = await pushCloudData({ silent: true })
-      if (uploaded && !silent) toast("✓ Nube actualizada")
+      if (uploaded && !silent) toast("Cloud updated")
       return uploaded
     }
 
@@ -476,13 +482,14 @@ async function pullCloudData(options = {}) {
     saveData(app.data, { touch: false, sync: false })
     app.cloudReady = true
     app.lastCloudSyncAt = Date.now()
-    setCloudStatus("Nube descargada y lista", false)
+    setCloudStatus("Cloud downloaded and ready", false)
     render()
-    if (!silent) toast("✓ Data de nube cargada")
+    if (!silent) haptic("success")
+    if (!silent) toast("Cloud data loaded")
     return true
   } catch (error) {
     setCloudStatus(cloudErrorMessage(error), false)
-    if (!silent) toast("No se pudo bajar")
+    if (!silent) toast("Could not download")
     return false
   }
 }
@@ -516,7 +523,7 @@ function compareMonthKeys(a, b) {
 function monthLabel(key) {
   const parsed = parseMonthKey(key)
   const date = parsed ? new Date(parsed.year, parsed.month, 1) : new Date()
-  return date.toLocaleDateString("es-MX", { month: "long", year: "numeric" })
+  return date.toLocaleDateString("en-US", { month: "long", year: "numeric" })
     .replace(/^\w/, c => c.toUpperCase())
 }
 
@@ -661,7 +668,7 @@ function makeWishId(desc) {
 }
 
 function todayLabel() {
-  return new Date().toLocaleDateString("es-MX", {
+  return new Date().toLocaleDateString("en-US", {
     day: "2-digit",
     month: "short"
   })
@@ -700,11 +707,11 @@ function getBudgetHealth(totalBudget, totalSpent, spent) {
     const totalRoll = app.state.budgets.reduce((sum, b) => sum + (Number(b.rollover) || 0), 0)
     if (Math.abs(totalRoll) >= 0.01) {
       return totalRoll > 0
-        ? { text: "Sobrante aplicado de meses anteriores", color: "var(--grn)", bg: "#ECFDF5", border: "#A7F3D0" }
-        : { text: "Ajuste aplicado por exceso anterior", color: "var(--red)", bg: "#FFF1F2", border: "#FCA5A5" }
+        ? { text: "Rollover from previous months applied", color: "var(--grn)", bg: "#ECFDF5", border: "#A7F3D0" }
+        : { text: "Previous overage applied", color: "var(--red)", bg: "#FFF1F2", border: "#FCA5A5" }
     }
 
-    return { text: "Todavía no hay gastos este mes", color: "var(--mut)", bg: "var(--card)", border: "var(--bord)" }
+    return { text: "No spending yet this month", color: "var(--mut)", bg: "var(--card)", border: "var(--bord)" }
   }
 
   const cats = app.state.budgets
@@ -725,7 +732,7 @@ function getBudgetHealth(totalBudget, totalSpent, spent) {
   const worstOver = cats.filter(x => x.over > 0).sort((a, b) => b.over - a.over)[0]
   if (worstOver) {
     return {
-      text: worstOver.icon + " Te pasaste en " + worstOver.label + " por " + fmt(worstOver.over),
+      text: worstOver.icon + " " + worstOver.label + " is over by " + fmt(worstOver.over),
       color: "var(--red)",
       bg: "#FFF1F2",
       border: "#FCA5A5"
@@ -735,7 +742,7 @@ function getBudgetHealth(totalBudget, totalSpent, spent) {
   const warning = cats.filter(x => x.pct >= 80).sort((a, b) => b.pct - a.pct)[0]
   if (warning) {
     return {
-      text: warning.icon + " Ojo: " + warning.label + " va en " + Math.round(warning.pct) + "%",
+      text: warning.icon + " " + warning.label + " is at " + Math.round(warning.pct) + "%",
       color: "var(--amb)",
       bg: "#FFFBEB",
       border: "#FCD34D"
@@ -743,9 +750,9 @@ function getBudgetHealth(totalBudget, totalSpent, spent) {
   }
 
   const globalPct = totalBudget > 0 ? (totalSpent / totalBudget) * 100 : 0
-  if (globalPct <= 35) return { text: "Buen ritmo este mes", color: "var(--grn)", bg: "#ECFDF5", border: "#A7F3D0" }
-  if (globalPct <= 70) return { text: "Vas bien este mes", color: "var(--acc)", bg: "var(--acc2)", border: "#9AD8CF" }
-  return { text: "Cerca del límite mensual", color: "var(--amb)", bg: "#FFFBEB", border: "#FCD34D" }
+  if (globalPct <= 35) return { text: "Great pace this month", color: "var(--grn)", bg: "#ECFDF5", border: "#A7F3D0" }
+  if (globalPct <= 70) return { text: "On track this month", color: "var(--acc)", bg: "var(--acc2)", border: "#9AD8CF" }
+  return { text: "Close to the monthly limit", color: "var(--amb)", bg: "#FFFBEB", border: "#FCD34D" }
 }
 
 function syncState() {
@@ -758,6 +765,50 @@ function syncState() {
   if (!app.newWishCat || !categoryById(app.newWishCat)) {
     app.newWishCat = app.state.budgets[0] ? app.state.budgets[0].id : null
   }
+}
+
+const ICON_PATHS = {
+  dashboard: '<path d="M3 11.5 12 4l9 7.5"/><path d="M5 10.5V20h14v-9.5"/><path d="M9 20v-6h6v6"/>',
+  add: '<path d="M12 5v14"/><path d="M5 12h14"/>',
+  activity: '<path d="M7 3h10l2 2v16H5V5l2-2Z"/><path d="M9 8h6"/><path d="M9 12h6"/><path d="M9 16h4"/>',
+  account: '<path d="M20 21a8 8 0 0 0-16 0"/><path d="M12 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8Z"/>',
+  cloud: '<path d="M17.5 18H8a5 5 0 1 1 1-9.9A6.5 6.5 0 0 1 21 11.5 3.5 3.5 0 0 1 17.5 18Z"/>',
+  grid: '<path d="M4 4h6v6H4z"/><path d="M14 4h6v6h-6z"/><path d="M4 14h6v6H4z"/><path d="M14 14h6v6h-6z"/>',
+  heart: '<path d="M20.8 5.6a5.2 5.2 0 0 0-7.4 0L12 7l-1.4-1.4a5.2 5.2 0 1 0-7.4 7.4L12 21l8.8-8a5.2 5.2 0 0 0 0-7.4Z"/>',
+  download: '<path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M5 21h14"/>',
+  upload: '<path d="M12 21V9"/><path d="m7 14 5-5 5 5"/><path d="M5 3h14"/>',
+  trash: '<path d="M4 7h16"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M6 7l1 14h10l1-14"/><path d="M9 7V4h6v3"/>',
+  edit: '<path d="M4 20h4l10.5-10.5a2.8 2.8 0 0 0-4-4L4 16v4Z"/><path d="m13.5 6.5 4 4"/>',
+  close: '<path d="M6 6l12 12"/><path d="M18 6 6 18"/>',
+  back: '<path d="m15 18-6-6 6-6"/>',
+  settings: '<path d="M12 15.5a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7Z"/><path d="M19.4 15a1.8 1.8 0 0 0 .36 2l.05.05a2.1 2.1 0 0 1-3 3l-.05-.05a1.8 1.8 0 0 0-2-.36 1.8 1.8 0 0 0-1.1 1.65V21a2.1 2.1 0 0 1-4.2 0v-.07a1.8 1.8 0 0 0-1.1-1.65 1.8 1.8 0 0 0-2 .36l-.05.05a2.1 2.1 0 0 1-3-3l.05-.05a1.8 1.8 0 0 0 .36-2 1.8 1.8 0 0 0-1.65-1.1H2a2.1 2.1 0 0 1 0-4.2h.07a1.8 1.8 0 0 0 1.65-1.1 1.8 1.8 0 0 0-.36-2l-.05-.05a2.1 2.1 0 0 1 3-3l.05.05a1.8 1.8 0 0 0 2 .36 1.8 1.8 0 0 0 1.1-1.65V2a2.1 2.1 0 0 1 4.2 0v.07a1.8 1.8 0 0 0 1.1 1.65 1.8 1.8 0 0 0 2-.36l.05-.05a2.1 2.1 0 0 1 3 3l-.05.05a1.8 1.8 0 0 0-.36 2 1.8 1.8 0 0 0 1.65 1.1H22a2.1 2.1 0 0 1 0 4.2h-.07a1.8 1.8 0 0 0-1.65 1.1Z"/>',
+  check: '<path d="m20 6-11 11-5-5"/>',
+  wallet: '<path d="M4 7a3 3 0 0 1 3-3h11v16H6a2 2 0 0 1-2-2V7Z"/><path d="M4 8h15"/><path d="M16 13h2"/>',
+  file: '<path d="M7 3h7l5 5v13H7V3Z"/><path d="M14 3v5h5"/><path d="M9 14h6"/><path d="M9 17h6"/>'
+}
+
+function icon(name, label = "", className = "") {
+  const body = ICON_PATHS[name] || ICON_PATHS.dashboard
+  const aria = label ? `role="img" aria-label="${attr(label)}"` : 'aria-hidden="true"'
+  return `<span class="ui-icon ${className}" ${aria}><svg viewBox="0 0 24 24" focusable="false">${body}</svg></span>`
+}
+
+function haptic(type = "light") {
+  if (!("vibrate" in navigator)) return
+
+  const patterns = {
+    light: 8,
+    medium: 14,
+    success: [10, 35, 10],
+    warning: [18, 40, 18]
+  }
+
+  navigator.vibrate(patterns[type] || patterns.light)
+}
+
+function secondaryBackView(defaultView = "account") {
+  const secondaryViews = ["cats", "presets", "wishes"]
+  return app.returnView && !secondaryViews.includes(app.returnView) ? app.returnView : defaultView
 }
 
 function header(title, subtitle, actions = "") {
@@ -774,16 +825,17 @@ function header(title, subtitle, actions = "") {
 
 function nav() {
   const items = [
-    ["home", "◉", "Resumen"],
-    ["add", "＋", "Gasto"],
-    ["log", "≡", "Historial"]
+    ["home", "dashboard", "Dashboard"],
+    ["add", "add", "Add"],
+    ["log", "activity", "Activity"],
+    ["account", "account", "Account"]
   ]
 
   return `
     <nav class="nav">
-      ${items.map(([view, icon, label]) => `
+      ${items.map(([view, iconName, label]) => `
         <button class="nav-btn ${app.view === view ? "active" : ""}" data-action="go" data-view="${view}">
-          <span class="nav-icon">${icon}</span>
+          ${icon(iconName, "", "nav-icon")}
           ${label}
         </button>
       `).join("")}
@@ -804,37 +856,35 @@ function renderHome() {
     : ""
   const health = getBudgetHealth(totalBudget, totalSpent, spent)
   const installButton = app.installPrompt
-    ? `<button class="top-btn icon-btn" title="Instalar" aria-label="Instalar" data-action="install">⇩</button>`
+    ? `<button class="top-btn icon-btn" title="Install" aria-label="Install" data-action="install">${icon("download")}</button>`
     : ""
-  const cloudTitle = app.cloudUser ? "Nube conectada" : "Conectar nube"
-  const cloudButton = `<button class="top-btn icon-btn cloud-btn ${app.cloudUser ? "online" : ""} ${app.cloudBusy ? "syncing" : ""}" title="${cloudTitle}" aria-label="${cloudTitle}" data-action="openData">☁</button>`
+  const cloudTitle = app.cloudUser ? "Cloud connected" : "Connect cloud"
+  const cloudButton = `<button class="top-btn icon-btn cloud-btn ${app.cloudUser ? "online" : ""} ${app.cloudBusy ? "syncing" : ""}" title="${cloudTitle}" aria-label="${cloudTitle}" data-action="go" data-view="account">${icon("cloud")}</button>`
 
   return `
     <section class="view">
-      ${header("Presupuesto", monthLabel(app.key), `
+      ${header("Budget Tracker", monthLabel(app.key), `
         ${cloudButton}
         ${installButton}
-        <button class="top-btn icon-btn" title="Wishlist" aria-label="Wishlist" data-action="go" data-view="wishes">♡</button>
-        <button class="top-btn icon-btn" title="Categorías" aria-label="Categorías" data-action="go" data-view="cats">◎</button>
       `)}
 
       <div class="hero">
-        <div class="hero-label">${left < 0 ? "Sobrepasado" : "Disponible"}</div>
+        <div class="hero-label">${left < 0 ? "Over budget" : "Available"}</div>
         <div class="hero-amount" style="color:${left < 0 ? "var(--red)" : "var(--txt)"}">${money0(Math.abs(left))}</div>
-        <div class="hero-sub">${fmt(totalSpent)} gastado de ${fmt(totalBudget)}${rollText}</div>
+        <div class="hero-sub">${fmt(totalSpent)} spent of ${fmt(totalBudget)}${rollText}</div>
         <div class="status-pill" style="color:${health.color};background:${health.bg};border-color:${health.border}">${esc(health.text)}</div>
 
         <div class="kpis">
           <div class="kpi">
-            <div class="kpi-label">Gastado</div>
+            <div class="kpi-label">Spent</div>
             <div class="kpi-value">${fmt(totalSpent)}</div>
           </div>
           <div class="kpi">
-            <div class="kpi-label">Límite</div>
+            <div class="kpi-label">Limit</div>
             <div class="kpi-value">${fmt(totalBudget)}</div>
           </div>
           <div class="kpi">
-            <div class="kpi-label">Uso</div>
+            <div class="kpi-label">Used</div>
             <div class="kpi-value" style="color:${globalPct > 90 ? "var(--red)" : globalPct > 70 ? "var(--amb)" : "var(--txt)"}">${Math.round(globalPct)}%</div>
           </div>
         </div>
@@ -872,13 +922,13 @@ function renderBudgetCard(budget) {
           <span class="emoji-box">${esc(budget.icon)}</span>
           <div>
             <div class="budget-name">${esc(budget.label)}</div>
-            <div class="budget-meta">${remaining >= 0 ? fmt(remaining) + " libre" : fmt(Math.abs(remaining)) + " sobre"}</div>
+            <div class="budget-meta">${remaining >= 0 ? fmt(remaining) + " left" : fmt(Math.abs(remaining)) + " over"}</div>
             ${roll ? `<div class="budget-meta">${esc(roll)}</div>` : ""}
           </div>
         </div>
         <div class="budget-right">
           <div class="budget-spent" style="color:${color}">${fmt(spent)}</div>
-          <div class="budget-limit">de ${fmt(limit)}</div>
+          <div class="budget-limit">of ${fmt(limit)}</div>
         </div>
       </div>
       <div class="budget-progress">
@@ -897,12 +947,14 @@ function renderAdd() {
 
   return `
     <section class="view">
-      ${header("Nuevo gasto", "Agregar movimiento")}
+      ${header("Add Expense", "Create a new transaction", `
+        <button class="top-btn icon-btn" title="Presets" aria-label="Presets" data-action="go" data-view="presets">${icon("settings")}</button>
+      `)}
 
       <div class="section">
         <div class="section-row">
-          <div class="section-label">Presets rápidos</div>
-          <button class="round-btn" title="Editar presets" aria-label="Editar presets" data-action="go" data-view="presets">⚙</button>
+          <div class="section-label">Quick presets</div>
+          <button class="text-btn" data-action="go" data-view="presets">Manage</button>
         </div>
         <div class="row-scroll">
           ${renderPresetButtons()}
@@ -911,27 +963,27 @@ function renderAdd() {
 
       <div class="section">
         <div class="section-row">
-          <div class="section-label">Categoría</div>
-          <button class="text-btn" data-action="openCatPicker">Cambiar</button>
+          <div class="section-label">Category</div>
+          <button class="text-btn" data-action="openCatPicker">Change</button>
         </div>
         <button class="selected-cat" style="border-color:${selectedColor};background:${selected ? cssColor(selected.color) + "10" : "var(--card)"};color:${selected ? cssColor(selected.color) : "var(--txt)"}" data-action="openCatPicker">
-          <span class="emoji-box" style="background:${selected ? cssColor(selected.color) + "16" : "var(--card2)"};color:${selected ? cssColor(selected.color) : "var(--txt)"}">${selected ? esc(selected.icon) : "＋"}</span>
-          <span class="label">${selected ? esc(selected.label) : "Elige una categoría"}</span>
-          <span class="arrow">›</span>
+          <span class="emoji-box" style="background:${selected ? cssColor(selected.color) + "16" : "var(--card2)"};color:${selected ? cssColor(selected.color) : "var(--txt)"}">${selected ? esc(selected.icon) : icon("add")}</span>
+          <span class="label">${selected ? esc(selected.label) : "Choose a category"}</span>
+          <span class="arrow">${icon("back", "", "chevron-next")}</span>
         </button>
       </div>
 
       <div class="field-group">
-        <div class="field-label">Monto</div>
+        <div class="field-label">Amount</div>
         <input class="field" id="add-amt" type="number" inputmode="decimal" placeholder="$0.00" value="${attr(app.drafts.add.amt)}">
       </div>
 
       <div class="field-group">
-        <div class="field-label">Descripción</div>
-        <input class="field" id="add-desc" type="text" placeholder="ej. Starbucks" value="${attr(app.drafts.add.desc)}">
+        <div class="field-label">Description</div>
+        <input class="field" id="add-desc" type="text" placeholder="e.g. Starbucks" value="${attr(app.drafts.add.desc)}">
       </div>
 
-      <button class="primary-btn" id="save-expense" data-action="saveExpense" ${canSaveExpense() ? "" : "disabled"}>Guardar gasto</button>
+      <button class="primary-btn" id="save-expense" data-action="saveExpense" ${canSaveExpense() ? "" : "disabled"}>${icon("check")} Save Expense</button>
 
       <div class="scroll"></div>
       ${nav()}
@@ -941,7 +993,7 @@ function renderAdd() {
 
 function renderPresetButtons() {
   if (!app.state.presets.length) {
-    return `<button class="preset-btn" data-action="go" data-view="presets">＋ Crear preset</button>`
+    return `<button class="preset-btn" data-action="go" data-view="presets">${icon("add")} Create preset</button>`
   }
 
   return app.state.presets.map(preset => {
@@ -961,12 +1013,12 @@ function renderLog() {
   const entries = [...(app.state.entries || [])].reverse()
   const content = entries.length
     ? entries.map(renderLogItem).join("")
-    : `<div class="empty"><div class="empty-icon">📭</div><div class="empty-title">Sin movimientos</div></div>`
+    : `<div class="empty"><div class="empty-icon">${icon("activity")}</div><div class="empty-title">No activity yet</div></div>`
 
   return `
     <section class="view">
-      ${header("Historial", "Toca un gasto para editar", `
-        <button class="top-btn icon-btn" title="Categorías" aria-label="Categorías" data-action="go" data-view="cats">◎</button>
+      ${header("Activity", "Tap an expense to edit it", `
+        <button class="top-btn icon-btn" title="Budgets" aria-label="Budgets" data-action="go" data-view="cats">${icon("grid")}</button>
       `)}
       <div class="scroll">
         <div class="item-list">${content}</div>
@@ -986,15 +1038,15 @@ function renderLogItem(entry) {
         <button class="list-left" data-action="openEntryEdit" data-id="${Number(entry.id)}">
           <span class="emoji-box" style="background:${color}16;color:${color}">${esc(cat.icon || "·")}</span>
           <span>
-            <span class="row-title">${esc(entry.desc || "Gasto")}</span>
-            <span class="row-meta">${esc(cat.label || entry.cat || "Sin categoría")}</span>
+            <span class="row-title">${esc(entry.desc || "Expense")}</span>
+            <span class="row-meta">${esc(cat.label || entry.cat || "Uncategorized")}</span>
           </span>
         </button>
         <button class="budget-right" data-action="openEntryEdit" data-id="${Number(entry.id)}">
           <span class="row-amount">${fmt(entry.amt)}</span>
           <span class="row-date">${esc(entry.date || "")}</span>
         </button>
-        <button class="delete-circle" title="Borrar" aria-label="Borrar" data-action="deleteEntry" data-id="${Number(entry.id)}">×</button>
+        <button class="delete-circle" title="Delete" aria-label="Delete" data-action="deleteEntry" data-id="${Number(entry.id)}">${icon("trash")}</button>
       </div>
     </div>
   `
@@ -1004,21 +1056,21 @@ function renderCategories() {
   return `
     <section class="view">
       <div class="subheader">
-        <button class="back-btn" aria-label="Volver" data-action="go" data-view="home">‹</button>
-        <div class="title">Categorías</div>
-        <button class="top-btn" data-action="openData">Datos</button>
+        <button class="back-btn" aria-label="Back" data-action="go" data-view="${secondaryBackView("account")}">${icon("back")}</button>
+        <div class="title">Budgets</div>
+        <span></span>
       </div>
 
       <div class="form-card">
-        <div class="section-label">Nueva categoría</div>
+        <div class="section-label">New budget</div>
         <div class="two-col" style="margin-top:9px">
           <input class="field emoji-input" id="cat-icon" type="text" maxlength="2" placeholder="Emoji" value="${attr(app.drafts.category.icon)}">
-          <input class="field" id="cat-label" type="text" placeholder="Nombre" value="${attr(app.drafts.category.label)}">
+          <input class="field" id="cat-label" type="text" placeholder="Name" value="${attr(app.drafts.category.label)}">
         </div>
         <div class="field-group">
-          <input class="field" id="cat-budget" type="number" inputmode="decimal" placeholder="Límite mensual base" value="${attr(app.drafts.category.budget)}">
+          <input class="field" id="cat-budget" type="number" inputmode="decimal" placeholder="Base monthly limit" value="${attr(app.drafts.category.budget)}">
         </div>
-        <button class="primary-btn" id="save-category" data-action="addCategory" ${canAddCategory() ? "" : "disabled"}>Agregar</button>
+        <button class="primary-btn" id="save-category" data-action="addCategory" ${canAddCategory() ? "" : "disabled"}>${icon("add")} Add Budget</button>
       </div>
 
       <div class="scroll">
@@ -1047,11 +1099,11 @@ function renderCategoryManagerCard(budget) {
         </div>
         <div class="cat-budget">Base ${fmt(base)}</div>
       </div>
-      <div class="cat-meta">${roll ? esc(roll) : "Sin rollover"} · efectivo este mes ${fmt(effective)}</div>
+      <div class="cat-meta">${roll ? esc(roll) : "No rollover"} · effective this month ${fmt(effective)}</div>
       <div class="cat-actions">
-        <input class="mini-field cat-budget-input" data-id="${attr(budget.id)}" type="number" inputmode="decimal" value="${base}" aria-label="Límite de ${attr(budget.label)}">
-        <button class="small-save" data-action="saveCategoryBudget" data-id="${attr(budget.id)}">Guardar</button>
-        <button class="small-delete" data-action="deleteCategory" data-id="${attr(budget.id)}">Borrar</button>
+        <input class="mini-field cat-budget-input" data-id="${attr(budget.id)}" type="number" inputmode="decimal" value="${base}" aria-label="${attr(budget.label)} limit">
+        <button class="small-save" data-action="saveCategoryBudget" data-id="${attr(budget.id)}">${icon("check")} Save</button>
+        <button class="small-delete" data-action="deleteCategory" data-id="${attr(budget.id)}">${icon("trash")} Delete</button>
       </div>
     </div>
   `
@@ -1061,28 +1113,28 @@ function renderPresets() {
   return `
     <section class="view">
       <div class="subheader">
-        <button class="back-btn" aria-label="Volver" data-action="go" data-view="add">‹</button>
+        <button class="back-btn" aria-label="Back" data-action="go" data-view="${secondaryBackView("account")}">${icon("back")}</button>
         <div class="title">Presets</div>
         <span></span>
       </div>
       <div class="form-card">
-        <div class="section-label">Nuevo preset</div>
+        <div class="section-label">New preset</div>
         <div class="two-col" style="margin-top:9px">
           <input class="field emoji-input" id="preset-icon" type="text" maxlength="2" placeholder="Emoji" value="${attr(app.drafts.preset.icon)}">
-          <input class="field" id="preset-desc" type="text" placeholder="Nombre / descripción" value="${attr(app.drafts.preset.desc)}">
+          <input class="field" id="preset-desc" type="text" placeholder="Name / description" value="${attr(app.drafts.preset.desc)}">
         </div>
         <div class="field-group">
-          <input class="field" id="preset-amt" type="number" inputmode="decimal" placeholder="Monto" value="${attr(app.drafts.preset.amt)}">
+          <input class="field" id="preset-amt" type="number" inputmode="decimal" placeholder="Amount" value="${attr(app.drafts.preset.amt)}">
         </div>
-        <div class="field-label">Categoría</div>
+        <div class="field-label">Category</div>
         <div class="pill-wrap">
           ${renderCategoryPills(app.newPresetCat, "pickPresetCat")}
         </div>
-        <button class="primary-btn" id="save-preset" data-action="addPreset" ${canAddPreset() ? "" : "disabled"}>Guardar preset</button>
+        <button class="primary-btn" id="save-preset" data-action="addPreset" ${canAddPreset() ? "" : "disabled"}>${icon("check")} Save Preset</button>
       </div>
       <div class="scroll">
         <div class="item-list">
-          ${app.state.presets.length ? app.state.presets.map(renderPresetCard).join("") : `<div class="empty"><div class="empty-icon">⚡</div><div class="empty-title">No tienes presets todavía</div></div>`}
+          ${app.state.presets.length ? app.state.presets.map(renderPresetCard).join("") : `<div class="empty"><div class="empty-icon">⚡</div><div class="empty-title">No presets yet</div></div>`}
         </div>
       </div>
     </section>
@@ -1100,10 +1152,10 @@ function renderPresetCard(preset) {
           <span class="emoji-box" style="background:${color}16;color:${color}">${esc(preset.icon || cat.icon || "⚡")}</span>
           <span>
             <span class="row-title">${esc(preset.desc)}</span>
-            <span class="row-meta">${fmt(preset.amt)} · ${esc(cat.label || "Sin categoría")}</span>
+            <span class="row-meta">${fmt(preset.amt)} · ${esc(cat.label || "Uncategorized")}</span>
           </span>
         </div>
-        <button class="small-delete" data-action="deletePreset" data-id="${attr(preset.id)}">Borrar</button>
+        <button class="small-delete" data-action="deletePreset" data-id="${attr(preset.id)}">${icon("trash")} Delete</button>
       </div>
     </div>
   `
@@ -1113,28 +1165,28 @@ function renderWishes() {
   return `
     <section class="view">
       <div class="subheader">
-        <button class="back-btn" aria-label="Volver" data-action="go" data-view="home">‹</button>
+        <button class="back-btn" aria-label="Back" data-action="go" data-view="${secondaryBackView("account")}">${icon("back")}</button>
         <div class="title">Wishlist</div>
         <span></span>
       </div>
       <div class="form-card">
-        <div class="section-label">Nuevo deseo</div>
+        <div class="section-label">New wish</div>
         <div class="two-col" style="margin-top:9px">
           <input class="field emoji-input" id="wish-icon" type="text" maxlength="2" placeholder="Emoji" value="${attr(app.drafts.wish.icon)}">
-          <input class="field" id="wish-desc" type="text" placeholder="Qué quieres comprar" value="${attr(app.drafts.wish.desc)}">
+          <input class="field" id="wish-desc" type="text" placeholder="What do you want to buy?" value="${attr(app.drafts.wish.desc)}">
         </div>
         <div class="field-group">
-          <input class="field" id="wish-amt" type="number" inputmode="decimal" placeholder="Monto estimado" value="${attr(app.drafts.wish.amt)}">
+          <input class="field" id="wish-amt" type="number" inputmode="decimal" placeholder="Estimated amount" value="${attr(app.drafts.wish.amt)}">
         </div>
-        <div class="field-label">Categoría al comprar</div>
+        <div class="field-label">Category when purchased</div>
         <div class="pill-wrap">
           ${renderCategoryPills(app.newWishCat, "pickWishCat")}
         </div>
-        <button class="primary-btn" id="save-wish" data-action="addWish" ${canAddWish() ? "" : "disabled"}>Guardar deseo</button>
+        <button class="primary-btn" id="save-wish" data-action="addWish" ${canAddWish() ? "" : "disabled"}>${icon("heart")} Save Wish</button>
       </div>
       <div class="scroll">
         <div class="item-list">
-          ${app.state.wishes.length ? app.state.wishes.map(renderWishCard).join("") : `<div class="empty"><div class="empty-icon">✨</div><div class="empty-title">Tu wishlist está vacía</div></div>`}
+          ${app.state.wishes.length ? app.state.wishes.map(renderWishCard).join("") : `<div class="empty"><div class="empty-icon">✨</div><div class="empty-title">Your wishlist is empty</div></div>`}
         </div>
       </div>
     </section>
@@ -1152,12 +1204,12 @@ function renderWishCard(wish) {
           <span class="emoji-box" style="background:${color}16;color:${color}">${esc(wish.icon || "✨")}</span>
           <span>
             <span class="row-title">${esc(wish.desc)}</span>
-            <span class="row-meta">${fmt(wish.amt)} · ${esc(cat.label || "Sin categoría")}</span>
+            <span class="row-meta">${fmt(wish.amt)} · ${esc(cat.label || "Uncategorized")}</span>
           </span>
         </button>
         <div class="list-actions">
-          <button class="success-btn" data-action="buyWish" data-id="${attr(wish.id)}">Comprar</button>
-          <button class="small-delete" data-action="deleteWish" data-id="${attr(wish.id)}">Borrar</button>
+          <button class="success-btn" data-action="buyWish" data-id="${attr(wish.id)}">${icon("check")} Buy</button>
+          <button class="small-delete" data-action="deleteWish" data-id="${attr(wish.id)}">${icon("trash")} Delete</button>
         </div>
       </div>
     </div>
@@ -1173,6 +1225,156 @@ function renderCategoryPills(selectedId, action) {
       </button>
     `
   }).join("")
+}
+
+function savedTimeLabel(value, emptyText) {
+  return value ? new Date(value).toLocaleString("en-US") : emptyText
+}
+
+function getDataSummary() {
+  const monthKeys = getTrackedMonthKeys(app.data)
+  return {
+    monthCount: monthKeys.length,
+    txCount: monthKeys.reduce((sum, key) => sum + (Array.isArray(app.data[key]) ? app.data[key].length : 0), 0),
+    saved: savedTimeLabel(app.data._settings._meta.lastSaved, "not saved yet"),
+    cloudSaved: savedTimeLabel(app.lastCloudSyncAt, "pending")
+  }
+}
+
+function renderCloudPanel() {
+  const summary = getDataSummary()
+  const cloudMode = app.cloudUser
+    ? `
+      <div class="cloud-account">
+        <span>${esc(app.cloudEmail || "Signed in")}</span>
+        <span>${esc(summary.cloudSaved)}</span>
+      </div>
+      <div class="sheet-actions">
+        <button class="secondary-btn" data-action="cloudPull" ${app.cloudBusy ? "disabled" : ""}>${icon("download")} Pull Cloud</button>
+        <button class="primary-btn" data-action="cloudPush" ${app.cloudBusy ? "disabled" : ""}>${icon("upload")} Push Now</button>
+      </div>
+      <button class="danger-btn cloud-full" data-action="cloudSignOut" ${app.cloudBusy ? "disabled" : ""}>${icon("account")} Sign Out</button>
+    `
+    : `
+      <div class="field-group cloud-login">
+        <div class="field-label">Email</div>
+        <input class="field" id="cloud-email" type="email" inputmode="email" autocomplete="email" autocapitalize="off" spellcheck="false" placeholder="you@email.com" value="${attr(app.drafts.cloud.email)}">
+      </div>
+      ${app.drafts.cloud.codeSent ? `
+        <div class="field-group cloud-login">
+          <div class="field-label">Code</div>
+          <input class="field code-field" id="cloud-code" type="text" inputmode="numeric" autocomplete="one-time-code" maxlength="6" placeholder="000000" value="${attr(app.drafts.cloud.code)}">
+        </div>
+        <div class="sheet-actions">
+          <button class="secondary-btn" data-action="cloudLogin" ${app.cloudBusy ? "disabled" : ""}>Resend</button>
+          <button class="primary-btn" data-action="cloudVerify" ${app.cloudBusy ? "disabled" : ""}>${icon("check")} Verify</button>
+        </div>
+      ` : `
+        <button class="primary-btn" data-action="cloudLogin" ${app.cloudBusy ? "disabled" : ""}>${icon("cloud")} Send Code</button>
+      `}
+    `
+
+  return `
+    <div class="cloud-panel ${app.cloudUser ? "connected" : ""}">
+      <div class="cloud-head">
+        <div>
+          <div class="cloud-kicker">Supabase</div>
+          <div class="cloud-title">${app.cloudUser ? "Automatic sync is active" : "Cloud sync"}</div>
+        </div>
+        <span class="cloud-dot ${app.cloudBusy ? "busy" : app.cloudUser ? "on" : ""}"></span>
+      </div>
+      <div class="data-note cloud-copy">
+        ${app.cloudUser ? "Changes upload automatically after you save. You can also push or pull manually." : "Use the email code flow so your session stays inside the installed PWA."}
+      </div>
+      ${cloudMode}
+      <div class="cloud-status">${esc(app.cloudStatus)}</div>
+    </div>
+  `
+}
+
+function renderBackupPanel() {
+  return `
+    <div class="account-panel">
+      <div class="panel-head">
+        <div>
+          <div class="section-label">Backup</div>
+          <div class="panel-title">Import & export</div>
+        </div>
+        ${icon("file", "", "panel-icon")}
+      </div>
+      <div class="data-grid">
+        <button class="secondary-btn" data-action="exportJSON">${icon("download")} Export full JSON</button>
+        <button class="secondary-btn" data-action="exportCSV">${icon("download")} Export this month CSV</button>
+        <button class="danger-btn" data-action="importJSON">${icon("upload")} Import JSON</button>
+      </div>
+    </div>
+  `
+}
+
+function renderToolCard(view, iconName, title, copy) {
+  return `
+    <button class="tool-card" data-action="go" data-view="${view}">
+      ${icon(iconName, "", "tool-icon")}
+      <span>
+        <span class="tool-title">${esc(title)}</span>
+        <span class="tool-copy">${esc(copy)}</span>
+      </span>
+    </button>
+  `
+}
+
+function renderAccount() {
+  const summary = getDataSummary()
+  const signedIn = !!app.cloudUser
+  const installPanel = app.installPrompt
+    ? `<button class="primary-btn" data-action="install">${icon("download")} Install App</button>`
+    : `<div class="data-note install-note">On iPhone, open Share in Safari and choose Add to Home Screen.</div>`
+
+  return `
+    <section class="view">
+      ${header("Account", signedIn ? app.cloudEmail : "Local-first budget tracker")}
+      <div class="scroll account-scroll">
+        <div class="account-card">
+          <div class="account-avatar">${icon(signedIn ? "account" : "wallet")}</div>
+          <div class="account-main">
+            <div class="account-name">${signedIn ? esc(app.cloudEmail) : "Not signed in"}</div>
+            <div class="account-meta">${summary.monthCount} months · ${summary.txCount} transactions · saved ${esc(summary.saved)}</div>
+          </div>
+        </div>
+
+        ${renderCloudPanel()}
+
+        <div class="account-panel">
+          <div class="panel-head">
+            <div>
+              <div class="section-label">Manage</div>
+              <div class="panel-title">App tools</div>
+            </div>
+            ${icon("settings", "", "panel-icon")}
+          </div>
+          <div class="tool-grid">
+            ${renderToolCard("cats", "grid", "Budgets", "Categories and monthly limits")}
+            ${renderToolCard("presets", "settings", "Presets", "Reusable quick expenses")}
+            ${renderToolCard("wishes", "heart", "Wishlist", "Planned purchases")}
+          </div>
+        </div>
+
+        ${renderBackupPanel()}
+
+        <div class="account-panel">
+          <div class="panel-head">
+            <div>
+              <div class="section-label">PWA</div>
+              <div class="panel-title">Installed app</div>
+            </div>
+            ${icon("download", "", "panel-icon")}
+          </div>
+          ${installPanel}
+        </div>
+      </div>
+      ${nav()}
+    </section>
+  `
 }
 
 function renderModal() {
@@ -1194,10 +1396,10 @@ function renderModal() {
 
 function renderCatPickerModal() {
   return `
-    <div class="sheet" role="dialog" aria-modal="true" aria-label="Cambiar categoría">
+    <div class="sheet" role="dialog" aria-modal="true" aria-label="Change category">
       <div class="sheet-top">
-        <div class="sheet-title">Cambiar categoría</div>
-        <button class="sheet-close" aria-label="Cerrar" data-action="closeModal">×</button>
+        <div class="sheet-title">Change category</div>
+        <button class="sheet-close" aria-label="Close" data-action="closeModal">${icon("close")}</button>
       </div>
       <div class="item-list">
         ${app.state.budgets.map(cat => {
@@ -1223,28 +1425,28 @@ function renderEntryEditModal() {
   }
 
   return `
-    <div class="sheet" role="dialog" aria-modal="true" aria-label="Editar gasto">
+    <div class="sheet" role="dialog" aria-modal="true" aria-label="Edit expense">
       <div class="sheet-top">
-        <div class="sheet-title">Editar gasto</div>
-        <button class="sheet-close" aria-label="Cerrar" data-action="closeModal">×</button>
+        <div class="sheet-title">Edit expense</div>
+        <button class="sheet-close" aria-label="Close" data-action="closeModal">${icon("close")}</button>
       </div>
       <div class="field-group">
-        <div class="field-label">Descripción</div>
-        <input class="field" id="edit-desc" type="text" placeholder="Descripción" value="${attr(app.drafts.edit.desc)}">
+        <div class="field-label">Description</div>
+        <input class="field" id="edit-desc" type="text" placeholder="Description" value="${attr(app.drafts.edit.desc)}">
       </div>
       <div class="field-group">
-        <div class="field-label">Monto</div>
+        <div class="field-label">Amount</div>
         <input class="field" id="edit-amt" type="number" inputmode="decimal" placeholder="$0.00" value="${attr(app.drafts.edit.amt)}">
       </div>
-      <div class="field-label">Categoría</div>
+      <div class="field-label">Category</div>
       <div class="pill-wrap">
         ${renderCategoryPills(app.editingCat, "pickEditCat")}
       </div>
       <div class="sheet-actions">
-        <button class="danger-btn" data-action="deleteEditingEntry">Borrar</button>
-        <button class="primary-btn" data-action="saveEditingEntry">Guardar</button>
+        <button class="danger-btn" data-action="deleteEditingEntry">${icon("trash")} Delete</button>
+        <button class="primary-btn" data-action="saveEditingEntry">${icon("check")} Save</button>
       </div>
-      <button class="secondary-btn" style="width:100%;margin-top:8px" data-action="saveEditingAsPreset">Guardar como preset</button>
+      <button class="secondary-btn" style="width:100%;margin-top:8px" data-action="saveEditingAsPreset">${icon("settings")} Save as preset</button>
     </div>
   `
 }
@@ -1257,99 +1459,46 @@ function renderWishEditModal() {
   }
 
   return `
-    <div class="sheet" role="dialog" aria-modal="true" aria-label="Editar deseo">
+    <div class="sheet" role="dialog" aria-modal="true" aria-label="Edit wish">
       <div class="sheet-top">
-        <div class="sheet-title">Editar deseo</div>
-        <button class="sheet-close" aria-label="Cerrar" data-action="closeModal">×</button>
+        <div class="sheet-title">Edit wish</div>
+        <button class="sheet-close" aria-label="Close" data-action="closeModal">${icon("close")}</button>
       </div>
       <div class="two-col">
         <input class="field emoji-input" id="wish-edit-icon" type="text" maxlength="2" placeholder="Emoji" value="${attr(app.drafts.wishEdit.icon)}">
-        <input class="field" id="wish-edit-desc" type="text" placeholder="Qué quieres comprar" value="${attr(app.drafts.wishEdit.desc)}">
+        <input class="field" id="wish-edit-desc" type="text" placeholder="What do you want to buy?" value="${attr(app.drafts.wishEdit.desc)}">
       </div>
       <div class="field-group">
-        <div class="field-label">Monto estimado</div>
+        <div class="field-label">Estimated amount</div>
         <input class="field" id="wish-edit-amt" type="number" inputmode="decimal" placeholder="$0.00" value="${attr(app.drafts.wishEdit.amt)}">
       </div>
-      <div class="field-label">Categoría al comprar</div>
+      <div class="field-label">Category when purchased</div>
       <div class="pill-wrap">
         ${renderCategoryPills(app.editingWishCat, "pickWishEditCat")}
       </div>
       <div class="sheet-actions">
-        <button class="danger-btn" data-action="deleteEditingWish">Borrar</button>
-        <button class="primary-btn" data-action="saveEditingWish">Guardar</button>
+        <button class="danger-btn" data-action="deleteEditingWish">${icon("trash")} Delete</button>
+        <button class="primary-btn" data-action="saveEditingWish">${icon("check")} Save</button>
       </div>
-      <button class="secondary-btn" style="width:100%;margin-top:8px" data-action="buyEditingWish">Comprar ahora</button>
+      <button class="secondary-btn" style="width:100%;margin-top:8px" data-action="buyEditingWish">${icon("check")} Buy now</button>
     </div>
   `
 }
 
 function renderDataModal() {
-  const monthCount = getTrackedMonthKeys(app.data).length
-  const txCount = getTrackedMonthKeys(app.data).reduce((sum, key) => sum + (Array.isArray(app.data[key]) ? app.data[key].length : 0), 0)
-  const saved = app.data._settings._meta.lastSaved ? new Date(app.data._settings._meta.lastSaved).toLocaleString("es-MX") : "aún sin guardar"
-  const cloudSaved = app.lastCloudSyncAt ? new Date(app.lastCloudSyncAt).toLocaleString("es-MX") : "pendiente"
-  const cloudMode = app.cloudUser
-    ? `
-      <div class="cloud-account">
-        <span>${esc(app.cloudEmail || "Sesión activa")}</span>
-        <span>${esc(cloudSaved)}</span>
-      </div>
-      <div class="sheet-actions">
-        <button class="secondary-btn" data-action="cloudPull" ${app.cloudBusy ? "disabled" : ""}>Bajar nube</button>
-        <button class="primary-btn" data-action="cloudPush" ${app.cloudBusy ? "disabled" : ""}>Subir ahora</button>
-      </div>
-      <button class="danger-btn cloud-full" data-action="cloudSignOut" ${app.cloudBusy ? "disabled" : ""}>Cerrar sesión</button>
-    `
-    : `
-      <div class="field-group cloud-login">
-        <div class="field-label">Email</div>
-        <input class="field" id="cloud-email" type="email" inputmode="email" autocomplete="email" autocapitalize="off" spellcheck="false" placeholder="tu@email.com" value="${attr(app.drafts.cloud.email)}">
-      </div>
-      ${app.drafts.cloud.codeSent ? `
-        <div class="field-group cloud-login">
-          <div class="field-label">Código</div>
-          <input class="field code-field" id="cloud-code" type="text" inputmode="numeric" autocomplete="one-time-code" maxlength="6" placeholder="000000" value="${attr(app.drafts.cloud.code)}">
-        </div>
-        <div class="sheet-actions">
-          <button class="secondary-btn" data-action="cloudLogin" ${app.cloudBusy ? "disabled" : ""}>Reenviar</button>
-          <button class="primary-btn" data-action="cloudVerify" ${app.cloudBusy ? "disabled" : ""}>Verificar</button>
-        </div>
-      ` : `
-        <button class="primary-btn" data-action="cloudLogin" ${app.cloudBusy ? "disabled" : ""}>Enviar código</button>
-      `}
-    `
+  const summary = getDataSummary()
 
   return `
-    <div class="sheet" role="dialog" aria-modal="true" aria-label="Datos y respaldo">
+    <div class="sheet" role="dialog" aria-modal="true" aria-label="Data and backup">
       <div class="sheet-top">
-        <div class="sheet-title">Datos y respaldo</div>
-        <button class="sheet-close" aria-label="Cerrar" data-action="closeModal">×</button>
+        <div class="sheet-title">Data and backup</div>
+        <button class="sheet-close" aria-label="Close" data-action="closeModal">${icon("close")}</button>
       </div>
       <div class="data-note">
-        Guardado local en este navegador · ${monthCount} meses · ${txCount} movimientos · último guardado ${esc(saved)}.
+        Local in this browser · ${summary.monthCount} months · ${summary.txCount} transactions · last saved ${esc(summary.saved)}.
       </div>
-      <div class="cloud-panel ${app.cloudUser ? "connected" : ""}">
-        <div class="cloud-head">
-          <div>
-            <div class="cloud-kicker">Supabase</div>
-            <div class="cloud-title">${app.cloudUser ? "Sync automática activa" : "Guardar en la nube"}</div>
-          </div>
-          <span class="cloud-dot ${app.cloudBusy ? "busy" : app.cloudUser ? "on" : ""}"></span>
-        </div>
-        <div class="data-note cloud-copy">
-          ${app.cloudUser ? "Los cambios se suben solos después de guardarlos. También puedes forzar subir o bajar aquí." : "Te mando un código por email. Escríbelo aquí para que la sesión quede dentro de la PWA instalada."}
-        </div>
-        ${cloudMode}
-        <div class="cloud-status">${esc(app.cloudStatus)}</div>
-      </div>
-      <div class="data-grid">
-        <button class="secondary-btn" data-action="exportJSON">Exportar JSON completo</button>
-        <button class="secondary-btn" data-action="exportCSV">Exportar CSV del mes actual</button>
-        <button class="danger-btn" data-action="importJSON">Importar JSON</button>
-      </div>
-      <div class="data-note" style="margin-top:12px;margin-bottom:0">
-        Para instalarla: en Chrome/Edge usa el botón de instalar si aparece. En iPhone, abre el menú Compartir y elige “Agregar a pantalla de inicio”.
-      </div>
+      ${renderCloudPanel()}
+      ${renderBackupPanel()}
     </div>
   `
 }
@@ -1361,6 +1510,7 @@ function render() {
     home: renderHome,
     add: renderAdd,
     log: renderLog,
+    account: renderAccount,
     cats: renderCategories,
     presets: renderPresets,
     wishes: renderWishes
@@ -1458,7 +1608,7 @@ function handleClick(event) {
   if (action === "chooseCat") chooseCat(id)
   if (action === "saveExpense") saveExpense()
   if (action === "usePreset") usePreset(id)
-  if (action === "openData") openModal("data")
+  if (action === "openData") go("account")
   if (action === "addCategory") addCategory()
   if (action === "saveCategoryBudget") saveCategoryBudget(id)
   if (action === "deleteCategory") deleteCategory(id)
@@ -1486,7 +1636,7 @@ function handleClick(event) {
   if (action === "cloudLogin") sendEmailCode()
   if (action === "cloudVerify") verifyEmailCode()
   if (action === "cloudPush") pushCloudData()
-  if (action === "cloudPull" && confirm("Esto reemplazará esta copia local con lo que esté en Supabase.")) pullCloudData()
+  if (action === "cloudPull" && confirm("This will replace this local copy with the data in Supabase.")) pullCloudData()
   if (action === "cloudSignOut") signOutCloud()
   if (action === "install") installPWA()
   if (action === "closeModal") closeModal()
@@ -1494,12 +1644,20 @@ function handleClick(event) {
 
 function go(view) {
   if (!view) return
+  const secondaryViews = ["cats", "presets", "wishes"]
+  if (secondaryViews.includes(view) && !secondaryViews.includes(app.view)) {
+    app.returnView = app.view || "account"
+  } else if (!secondaryViews.includes(view)) {
+    app.returnView = null
+  }
+  if (app.view !== view) haptic("light")
   app.view = view
   closeModal(false)
   render()
 }
 
 function quickAdd(id) {
+  haptic("light")
   app.selectedCat = id
   app.view = "add"
   render()
@@ -1507,6 +1665,7 @@ function quickAdd(id) {
 }
 
 function openModal(name) {
+  haptic("light")
   app.modal = name
   renderModal()
 }
@@ -1522,10 +1681,11 @@ function closeModal(shouldRender = true) {
 
 function chooseCat(id) {
   if (!categoryById(id)) return
+  haptic("light")
   app.selectedCat = id
   closeModal(false)
   render()
-  toast("Categoría lista")
+  toast("Category selected")
 }
 
 function saveExpense() {
@@ -1547,7 +1707,8 @@ function saveExpense() {
   saveData(app.data)
   app.view = "home"
   render()
-  toast("✓ Guardado")
+  haptic("success")
+  toast("Saved")
 }
 
 function usePreset(id) {
@@ -1557,7 +1718,8 @@ function usePreset(id) {
   app.drafts.add.desc = preset.desc || ""
   if (categoryById(preset.cat)) app.selectedCat = preset.cat
   render()
-  toast("Preset listo")
+  haptic("light")
+  toast("Preset ready")
 }
 
 function addCategory() {
@@ -1576,7 +1738,8 @@ function addCategory() {
   app.drafts.category = { icon: "", label: "", budget: "" }
   saveData(app.data)
   render()
-  toast("✓ Categoría agregada")
+  haptic("success")
+  toast("Budget added")
 }
 
 function saveCategoryBudget(id) {
@@ -1585,25 +1748,26 @@ function saveCategoryBudget(id) {
   const cat = rawCategoryById(id)
 
   if (!cat || amount <= 0) {
-    toast("Límite inválido")
+    toast("Invalid limit")
     return
   }
 
   cat.budget = amount
   saveData(app.data)
   render()
-  toast("✓ Límite actualizado")
+  haptic("success")
+  toast("Limit updated")
 }
 
 function deleteCategory(id) {
   if (app.data._settings.budgets.length <= 1) {
-    toast("Deja mínimo 1 categoría")
+    toast("Keep at least 1 budget")
     return
   }
 
   const cat = rawCategoryById(id)
   if (!cat) return
-  if (!confirm(`¿Borrar ${cat.label}? También se borrarán sus gastos, presets y deseos.`)) return
+  if (!confirm(`Delete ${cat.label}? Its expenses, presets, and wishes will also be deleted.`)) return
 
   app.data._settings.budgets = app.data._settings.budgets.filter(b => b.id !== id)
   Object.keys(app.data).forEach(key => {
@@ -1618,7 +1782,8 @@ function deleteCategory(id) {
 
   saveData(app.data)
   render()
-  toast("Categoría borrada")
+  haptic("warning")
+  toast("Budget deleted")
 }
 
 function pickPresetCat(id) {
@@ -1640,7 +1805,8 @@ function addPreset() {
   app.drafts.preset = { icon: "", desc: "", amt: "" }
   saveData(app.data)
   render()
-  toast("✓ Preset creado")
+  haptic("success")
+  toast("Preset created")
 }
 
 function deletePreset(id) {
@@ -1649,7 +1815,8 @@ function deletePreset(id) {
   app.data._settings.presets = app.data._settings.presets.filter(preset => preset.id !== id)
   saveData(app.data)
   render()
-  toast("Preset borrado")
+  haptic("warning")
+  toast("Preset deleted")
 }
 
 function pickWishCat(id) {
@@ -1670,20 +1837,22 @@ function addWish() {
   app.drafts.wish = { icon: "", desc: "", amt: "" }
   saveData(app.data)
   render()
-  toast("✓ Deseo guardado")
+  haptic("success")
+  toast("Wish saved")
 }
 
 function deleteWish(id) {
   app.data._settings.wishes = app.data._settings.wishes.filter(wish => wish.id !== id)
   saveData(app.data)
   render()
-  toast("Deseo borrado")
+  haptic("warning")
+  toast("Wish deleted")
 }
 
 function buyWish(id) {
   const wish = wishById(id)
   if (!wish || !categoryById(wish.cat)) {
-    toast("Categoría inválida")
+    toast("Invalid category")
     return
   }
 
@@ -1698,12 +1867,14 @@ function buyWish(id) {
   app.data._settings.wishes = app.data._settings.wishes.filter(w => w.id !== id)
   saveData(app.data)
   render()
-  toast("✓ Comprado y enviado al historial")
+  haptic("success")
+  toast("Bought and added to Activity")
 }
 
 function openWishEdit(id) {
   const wish = wishById(id)
   if (!wish) return
+  haptic("light")
   app.editingWishId = wish.id
   app.editingWishCat = wish.cat
   app.drafts.wishEdit = {
@@ -1725,7 +1896,7 @@ function saveEditingWish() {
   const amount = Number(app.drafts.wishEdit.amt)
   const desc = app.drafts.wishEdit.desc.trim()
   if (!wish || !desc || amount <= 0 || !categoryById(app.editingWishCat)) {
-    toast("Revisa los datos")
+    toast("Check the details")
     return
   }
 
@@ -1736,7 +1907,8 @@ function saveEditingWish() {
   closeModal(false)
   saveData(app.data)
   render()
-  toast("✓ Deseo actualizado")
+  haptic("success")
+  toast("Wish updated")
 }
 
 function deleteEditingWish() {
@@ -1760,6 +1932,7 @@ function buyEditingWish() {
 function openEntryEdit(id) {
   const entry = entryById(id)
   if (!entry) return
+  haptic("light")
   app.editingEntryId = Number(entry.id)
   app.editingCat = entry.cat
   app.drafts.edit = {
@@ -1779,17 +1952,18 @@ function saveEditingEntry() {
   const entry = entryById(app.editingEntryId)
   const amount = Number(app.drafts.edit.amt)
   if (!entry || !app.editingCat || amount <= 0) {
-    toast("Revisa monto/categoría")
+    toast("Check amount and category")
     return
   }
 
-  entry.desc = app.drafts.edit.desc.trim() || "Gasto"
+  entry.desc = app.drafts.edit.desc.trim() || "Expense"
   entry.amt = amount
   entry.cat = app.editingCat
   closeModal(false)
   saveData(app.data)
   render()
-  toast("✓ Gasto actualizado")
+  haptic("success")
+  toast("Expense updated")
 }
 
 function deleteEntry(id) {
@@ -1797,7 +1971,8 @@ function deleteEntry(id) {
   app.data[app.key] = app.data[app.key].filter(entry => Number(entry.id) !== Number(id))
   saveData(app.data)
   render()
-  toast("Eliminado")
+  haptic("warning")
+  toast("Deleted")
 }
 
 function deleteEditingEntry() {
@@ -1812,7 +1987,7 @@ function saveEditingAsPreset() {
   const cat = categoryById(app.editingCat)
 
   if (!desc || amount <= 0 || !cat) {
-    toast("Revisa los datos")
+    toast("Check the details")
     return
   }
 
@@ -1826,19 +2001,21 @@ function saveEditingAsPreset() {
   closeModal(false)
   saveData(app.data)
   render()
-  toast("✓ Preset creado")
+  haptic("success")
+  toast("Preset created")
 }
 
 function exportJSON() {
   downloadFile("budget_export.json", JSON.stringify(ensureDataShape(app.data), null, 2), "application/json")
-  toast("✓ JSON listo")
+  haptic("success")
+  toast("JSON exported")
 }
 
 function exportCSV() {
   const budgets = app.data._settings.budgets
   const labels = {}
   budgets.forEach(b => { labels[b.id] = b.label })
-  const lines = ["Fecha,Categoria,Descripcion,Monto"]
+  const lines = ["Date,Category,Description,Amount"]
   ;(app.data[app.key] || []).forEach(entry => {
     lines.push([
       csvEscape(entry.date || ""),
@@ -1849,7 +2026,8 @@ function exportCSV() {
   })
 
   downloadFile(`budget_${app.key}.csv`, lines.join("\n"), "text/csv")
-  toast("✓ CSV listo")
+  haptic("success")
+  toast("CSV exported")
 }
 
 function csvEscape(value) {
@@ -1883,7 +2061,7 @@ function importJSON() {
       const shaped = ensureDataShape(parsed)
       const monthKeys = Object.keys(shaped).filter(k => k !== "_settings" && parseMonthKey(k))
       const txCount = monthKeys.reduce((sum, key) => sum + (Array.isArray(shaped[key]) ? shaped[key].length : 0), 0)
-      const message = `Esto reemplazará tus datos locales por ${shaped._settings.budgets.length} categorías, ${monthKeys.length} meses y ${txCount} movimientos.`
+      const message = `This will replace your local data with ${shaped._settings.budgets.length} budgets, ${monthKeys.length} months, and ${txCount} transactions.`
 
       if (!confirm(message)) return
 
@@ -1892,9 +2070,10 @@ function importJSON() {
       saveData(app.data)
       closeModal(false)
       render()
-      toast("✓ Datos importados")
+      haptic("success")
+      toast("Data imported")
     } catch (error) {
-      toast("JSON inválido")
+      toast("Invalid JSON")
     }
   })
   input.click()
@@ -1902,6 +2081,7 @@ function importJSON() {
 
 async function installPWA() {
   if (!app.installPrompt) return
+  haptic("medium")
   app.installPrompt.prompt()
   await app.installPrompt.userChoice.catch(() => null)
   app.installPrompt = null

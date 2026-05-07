@@ -1,7 +1,7 @@
 {
-  "name": "Presupuesto",
+  "name": "Budget Tracker",
   "short_name": "Budget",
-  "description": "Budget tracker offline para gastos, categorías, presets y wishlist.",
+  "description": "Offline budget tracker for expenses, budgets, presets, wishlist, and cloud sync.",
   "start_url": "./index.html",
   "scope": "./",
   "display": "standalone",

@@ -1,4 +1,4 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="Presupuesto">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="Budget Tracker">
   <defs>
     <linearGradient id="bg" x1="80" x2="432" y1="40" y2="472" gradientUnits="userSpaceOnUse">
       <stop stop-color="#0F766E"/>
