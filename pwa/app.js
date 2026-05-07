@@ -36,10 +36,16 @@ const app = {
   modal: null,
   selectedCat: null,
   returnView: null,
+  editingBudgetId: null,
+  editingPresetId: null,
+  editingPresetCat: null,
   editingEntryId: null,
   editingCat: null,
   editingWishId: null,
   editingWishCat: null,
+  iconPickerTarget: null,
+  iconPickerReturnModal: null,
+  iconPickerQuery: "",
   newPresetCat: null,
   newWishCat: null,
   installPrompt: null,
@@ -47,16 +53,18 @@ const app = {
   cloudEmail: "",
   cloudReady: false,
   cloudBusy: false,
-  cloudStatus: "Cloud not connected",
+  cloudStatus: "Sign in to keep your data backed up",
   lastCloudSyncAt: null,
   drafts: {
     add: { amt: "", desc: "" },
     category: { icon: "", label: "", budget: "" },
     preset: { icon: "", desc: "", amt: "" },
+    presetEdit: { icon: "", desc: "", amt: "" },
     wish: { icon: "", desc: "", amt: "" },
+    budgetEdit: { icon: "", label: "", budget: "" },
     edit: { desc: "", amt: "" },
     wishEdit: { icon: "", desc: "", amt: "" },
-    cloud: { email: "", code: "", codeSent: false }
+    cloud: { email: "", password: "", code: "", codeSent: false, mode: "signin", resetSent: false }
   }
 }
 
@@ -241,7 +249,11 @@ function setCloudStatus(message, busy) {
 }
 
 function cloudErrorMessage(error) {
-  const message = error && error.message ? String(error.message) : "Could not connect to Supabase"
+  const raw = error && error.message ? String(error.message) : "Backup is unavailable right now"
+  const message = raw
+    .replace(/supabase/gi, "backup")
+    .replace(/invalid login credentials/gi, "Email or password is incorrect")
+    .replace(/email not confirmed/gi, "Check your email to finish setting up your account")
   return message.length > 110 ? message.slice(0, 107) + "..." : message
 }
 
@@ -255,16 +267,16 @@ function applyCloudSession(session) {
     app.cloudReady = false
     app.cloudBusy = false
     app.lastCloudSyncAt = null
-    app.cloudStatus = "Connect your email to save to Supabase"
-  } else if (!app.cloudStatus || app.cloudStatus === "Cloud not connected") {
-    app.cloudStatus = "Connecting to your cloud..."
+    app.cloudStatus = "Sign in to keep your data backed up"
+  } else if (!app.cloudStatus || app.cloudStatus === "Sign in to keep your data backed up") {
+    app.cloudStatus = "Setting up backup..."
   }
 }
 
 function scheduleCloudSave() {
   if (!supabaseClient || !app.cloudUser || !app.cloudReady) return
   clearTimeout(cloudSaveTimer)
-  app.cloudStatus = "Pending changes to upload"
+  app.cloudStatus = "Syncing..."
   refreshCloudSurface()
   cloudSaveTimer = setTimeout(() => {
     pushCloudData({ silent: true })
@@ -281,7 +293,7 @@ function startCloudSync(options = {}) {
 
 async function initCloud() {
   if (!window.supabase || typeof window.supabase.createClient !== "function") {
-    app.cloudStatus = "Supabase did not load; the app is still saving locally"
+    app.cloudStatus = "Backup is unavailable. Data is saved on this device."
     render()
     return
   }
@@ -321,7 +333,7 @@ async function initCloud() {
 
 async function sendEmailCode() {
   if (!supabaseClient) {
-    toast("Supabase is not ready")
+    toast("Backup is not ready")
     return
   }
 
@@ -333,7 +345,7 @@ async function sendEmailCode() {
   }
 
   app.drafts.cloud.email = email
-  setCloudStatus("Sending email code...", true)
+  setCloudStatus("Sending code...", true)
 
   try {
     const { error } = await supabaseClient.auth.signInWithOtp({
@@ -345,7 +357,8 @@ async function sendEmailCode() {
     if (error) throw error
     app.drafts.cloud.codeSent = true
     app.drafts.cloud.code = ""
-    setCloudStatus("Code sent. Type it here without leaving the app.", false)
+    app.drafts.cloud.mode = "code"
+    setCloudStatus("Code sent. Type it here to sign in.", false)
     haptic("success")
     toast("Check your email")
   } catch (error) {
@@ -356,7 +369,7 @@ async function sendEmailCode() {
 
 async function verifyEmailCode() {
   if (!supabaseClient) {
-    toast("Supabase is not ready")
+    toast("Backup is not ready")
     return
   }
 
@@ -386,13 +399,127 @@ async function verifyEmailCode() {
     app.drafts.cloud.codeSent = false
     app.drafts.cloud.code = ""
     await startCloudSync({ preferNewer: true, silent: true })
-    setCloudStatus("Cloud connected", false)
+    setCloudStatus("Saved", false)
     render()
     haptic("success")
-    toast("Cloud connected")
+    toast("Signed in")
   } catch (error) {
     setCloudStatus(cloudErrorMessage(error), false)
     toast("Invalid code")
+  }
+}
+
+function getCloudCredentials() {
+  const emailField = document.getElementById("cloud-email")
+  const passwordField = document.getElementById("cloud-password")
+  const email = String((emailField && emailField.value) || app.drafts.cloud.email || "").trim().toLowerCase()
+  const password = String((passwordField && passwordField.value) || app.drafts.cloud.password || "")
+  return { email, password }
+}
+
+function isValidEmail(email) {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(email || ""))
+}
+
+async function signInWithPassword() {
+  if (!supabaseClient) {
+    toast("Backup is not ready")
+    return
+  }
+
+  const { email, password } = getCloudCredentials()
+  if (!isValidEmail(email) || password.length < 6) {
+    toast("Enter email and password")
+    return
+  }
+
+  app.drafts.cloud.email = email
+  app.drafts.cloud.password = password
+  setCloudStatus("Signing in...", true)
+
+  try {
+    const { data, error } = await supabaseClient.auth.signInWithPassword({ email, password })
+    if (error) throw error
+    applyCloudSession(data.session)
+    app.drafts.cloud.password = ""
+    await startCloudSync({ preferNewer: true, silent: true })
+    setCloudStatus("Saved", false)
+    render()
+    haptic("success")
+    toast("Signed in")
+  } catch (error) {
+    setCloudStatus(cloudErrorMessage(error), false)
+    toast(cloudErrorMessage(error))
+  }
+}
+
+async function createPasswordAccount() {
+  if (!supabaseClient) {
+    toast("Backup is not ready")
+    return
+  }
+
+  const { email, password } = getCloudCredentials()
+  if (!isValidEmail(email) || password.length < 6) {
+    toast("Use a valid email and 6+ character password")
+    return
+  }
+
+  app.drafts.cloud.email = email
+  app.drafts.cloud.password = password
+  setCloudStatus("Creating account...", true)
+
+  try {
+    const { data, error } = await supabaseClient.auth.signUp({ email, password })
+    if (error) throw error
+    app.drafts.cloud.password = ""
+
+    if (data.session) {
+      applyCloudSession(data.session)
+      await startCloudSync({ preferNewer: true, silent: true })
+      setCloudStatus("Saved", false)
+      render()
+      haptic("success")
+      toast("Account created")
+      return
+    }
+
+    setCloudStatus("Check your email to finish creating your account.", false)
+    render()
+    haptic("success")
+    toast("Check your email")
+  } catch (error) {
+    setCloudStatus(cloudErrorMessage(error), false)
+    toast(cloudErrorMessage(error))
+  }
+}
+
+async function sendPasswordReset() {
+  if (!supabaseClient) {
+    toast("Backup is not ready")
+    return
+  }
+
+  const { email } = getCloudCredentials()
+  if (!isValidEmail(email)) {
+    toast("Enter your email first")
+    return
+  }
+
+  app.drafts.cloud.email = email
+  setCloudStatus("Sending reset email...", true)
+
+  try {
+    const redirectTo = window.location.href.split("#")[0]
+    const { error } = await supabaseClient.auth.resetPasswordForEmail(email, { redirectTo })
+    if (error) throw error
+    app.drafts.cloud.resetSent = true
+    setCloudStatus("Password reset email sent.", false)
+    haptic("success")
+    toast("Check your email")
+  } catch (error) {
+    setCloudStatus(cloudErrorMessage(error), false)
+    toast("Could not send reset email")
   }
 }
 
@@ -401,6 +528,10 @@ async function signOutCloud() {
   setCloudStatus("Signing out...", true)
   await supabaseClient.auth.signOut().catch(() => null)
   applyCloudSession(null)
+  app.drafts.cloud.password = ""
+  app.drafts.cloud.code = ""
+  app.drafts.cloud.codeSent = false
+  app.drafts.cloud.mode = "signin"
   render()
   haptic("medium")
   toast("Signed out")
@@ -409,12 +540,12 @@ async function signOutCloud() {
 async function pushCloudData(options = {}) {
   const silent = !!options.silent
   if (!supabaseClient || !app.cloudUser) {
-    if (!silent) toast("Connect cloud first")
+    if (!silent) toast("Sign in first")
     return false
   }
 
   clearTimeout(cloudSaveTimer)
-  setCloudStatus("Uploading changes to Supabase...", true)
+  setCloudStatus("Syncing...", true)
 
   try {
     const payload = ensureDataShape(clone(app.data))
@@ -428,13 +559,13 @@ async function pushCloudData(options = {}) {
 
     app.cloudReady = true
     app.lastCloudSyncAt = Date.now()
-    setCloudStatus("Cloud is up to date", false)
+    setCloudStatus("Saved", false)
     if (!silent) haptic("success")
-    if (!silent) toast("Saved to cloud")
+    if (!silent) toast("Backed up")
     return true
   } catch (error) {
     setCloudStatus(cloudErrorMessage(error), false)
-    if (!silent) toast("Could not upload")
+    if (!silent) toast("Could not sync")
     return false
   }
 }
@@ -443,11 +574,11 @@ async function pullCloudData(options = {}) {
   const preferNewer = !!options.preferNewer
   const silent = !!options.silent
   if (!supabaseClient || !app.cloudUser) {
-    if (!silent) toast("Connect cloud first")
+    if (!silent) toast("Sign in first")
     return false
   }
 
-  setCloudStatus("Reading Supabase...", true)
+  setCloudStatus("Restoring backup...", true)
 
   try {
     const { data: row, error } = await supabaseClient
@@ -461,7 +592,7 @@ async function pullCloudData(options = {}) {
     if (!row || !row.data) {
       app.cloudReady = true
       const uploaded = await pushCloudData({ silent: true })
-      if (uploaded && !silent) toast("Current data uploaded to cloud")
+      if (uploaded && !silent) toast("Backup ready")
       return uploaded
     }
 
@@ -471,9 +602,9 @@ async function pullCloudData(options = {}) {
 
     if (preferNewer && localSavedAt > remoteSavedAt + 1000) {
       app.cloudReady = true
-      setCloudStatus("Your local data is newer; uploading...", true)
+      setCloudStatus("Saving latest changes...", true)
       const uploaded = await pushCloudData({ silent: true })
-      if (uploaded && !silent) toast("Cloud updated")
+      if (uploaded && !silent) toast("Backup updated")
       return uploaded
     }
 
@@ -482,14 +613,14 @@ async function pullCloudData(options = {}) {
     saveData(app.data, { touch: false, sync: false })
     app.cloudReady = true
     app.lastCloudSyncAt = Date.now()
-    setCloudStatus("Cloud downloaded and ready", false)
+    setCloudStatus("Saved", false)
     render()
     if (!silent) haptic("success")
-    if (!silent) toast("Cloud data loaded")
+    if (!silent) toast("Backup restored")
     return true
   } catch (error) {
     setCloudStatus(cloudErrorMessage(error), false)
-    if (!silent) toast("Could not download")
+    if (!silent) toast("Could not restore backup")
     return false
   }
 }
@@ -787,6 +918,68 @@ const ICON_PATHS = {
   file: '<path d="M7 3h7l5 5v13H7V3Z"/><path d="M14 3v5h5"/><path d="M9 14h6"/><path d="M9 17h6"/>'
 }
 
+const ICON_PICKER_GROUPS = [
+  ["Frequent", [
+    ["💵", "Cash", "money dollars income"], ["💳", "Card", "credit debit payment"], ["🧾", "Receipt", "bill invoice expense"], ["🏷️", "Extras", "other misc tag"],
+    ["➕", "Other", "add plus miscellaneous"], ["🎯", "Goal", "target savings objective"], ["🔁", "Repeat", "recurring subscription"], ["🪙", "Coins", "change cash"]
+  ]],
+  ["Food & Drink", [
+    ["☕", "Coffee", "cafe espresso starbucks"], ["🍽", "Restaurants", "dinner lunch food"], ["🛒", "Groceries", "supermarket market"], ["🍔", "Fast food", "burger takeout"],
+    ["🥗", "Healthy food", "salad"], ["🍕", "Pizza", "slice"], ["🍣", "Sushi", "japanese"], ["🧋", "Drinks", "boba tea"],
+    ["🍩", "Sweets", "dessert donut"], ["🍞", "Bakery", "bread"], ["🍺", "Bar", "beer drinks"], ["🥘", "Meals", "cooking dinner"]
+  ]],
+  ["Transport", [
+    ["🚗", "Car", "auto vehicle"], ["🚕", "Taxi", "uber lyft cab"], ["⛽", "Gas", "fuel"], ["🅿️", "Parking", "garage"],
+    ["🚌", "Bus", "transit"], ["🚆", "Train", "metro subway"], ["✈️", "Flights", "airplane travel"], ["🛵", "Scooter", "moped"],
+    ["🚲", "Bike", "bicycle"], ["🛞", "Tires", "maintenance repair"], ["🧰", "Car repair", "mechanic tools"], ["🧼", "Car wash", "cleaning"]
+  ]],
+  ["Shopping", [
+    ["📦", "Online shopping", "amazon package"], ["🛍", "Shopping", "bags mall"], ["👕", "Clothes", "shirt apparel"], ["👟", "Shoes", "sneakers"],
+    ["💄", "Beauty", "makeup cosmetics"], ["💻", "Computer", "laptop electronics"], ["📱", "Phone", "mobile device"], ["🎮", "Games", "gaming console"],
+    ["🎁", "Gifts", "present"], ["🧸", "Toys", "kids"], ["🏷️", "Deals", "discount sale"], ["🛠", "Hardware", "tools"]
+  ]],
+  ["Home", [
+    ["🏠", "Home", "rent mortgage house"], ["🛋", "Furniture", "sofa"], ["🛏", "Bedroom", "bed"], ["🧺", "Laundry", "clothes wash"],
+    ["🧼", "Cleaning", "soap supplies"], ["💡", "Electricity", "power light"], ["🚿", "Water", "shower utility"], ["🔥", "Gas", "heat utility"],
+    ["🧰", "Repairs", "maintenance tools"], ["🌱", "Garden", "plants yard"], ["📦", "Storage", "boxes moving"], ["🔑", "Rent fee", "key lease"]
+  ]],
+  ["Bills", [
+    ["🧾", "Bills", "utilities invoice"], ["📱", "Phone plan", "cell mobile"], ["🌐", "Internet", "wifi web"], ["🎬", "Streaming", "netflix movies"],
+    ["🎵", "Music", "spotify audio"], ["📰", "News", "subscription"], ["☁️", "Software", "saas cloud"], ["🛡", "Insurance", "protection"],
+    ["🏦", "Bank", "account fee"], ["💳", "Credit card", "debt payment"], ["📮", "Mail", "shipping postage"], ["🧮", "Taxes", "accounting"]
+  ]],
+  ["Health", [
+    ["💊", "Pharmacy", "medicine"], ["🩺", "Doctor", "health medical"], ["🦷", "Dentist", "teeth"], ["👓", "Vision", "glasses"],
+    ["🧴", "Personal care", "lotion hygiene"], ["🏋️", "Gym", "fitness weights"], ["🧘", "Wellness", "mindfulness"], ["🍎", "Nutrition", "diet"],
+    ["🧪", "Lab", "tests"], ["🚑", "Emergency", "urgent medical"], ["🩹", "Care", "bandage"], ["💈", "Haircut", "barber salon"]
+  ]],
+  ["Work", [
+    ["💼", "Work", "business office"], ["📈", "Growth", "chart"], ["🧠", "Learning", "ideas"], ["🛠", "Tools", "software hardware"],
+    ["⚙️", "Operations", "settings"], ["🧾", "Invoices", "client billing"], ["📚", "Books", "education"], ["🧪", "Experiments", "testing lab"],
+    ["🖥", "Desk setup", "monitor"], ["🖨", "Printing", "printer"], ["👨‍💻", "Developer", "coding api"], ["🎙", "Content", "podcast microphone"]
+  ]],
+  ["Travel & Fun", [
+    ["🧳", "Travel", "luggage trip"], ["🏨", "Hotel", "stay"], ["🗺", "Tours", "map"], ["🎟", "Tickets", "events"],
+    ["🎬", "Movies", "cinema"], ["🎵", "Music", "concert"], ["🎨", "Art", "creative"], ["📷", "Photos", "camera"],
+    ["🏖", "Vacation", "beach"], ["⛳", "Sports", "golf game"], ["🎲", "Games", "board"], ["🕹", "Arcade", "play"]
+  ]],
+  ["Personal", [
+    ["🎓", "Education", "school course"], ["👶", "Kids", "children family"], ["🎂", "Birthday", "celebration"], ["💐", "Flowers", "gift"],
+    ["❤️", "Love", "date relationship"], ["🫶", "Giving", "support"], ["🙏", "Donations", "charity"], ["✂️", "Haircut", "salon"],
+    ["🧵", "Tailor", "sewing"], ["🧳", "Personal", "life"], ["📌", "Important", "pin"], ["🗓", "Plans", "calendar"]
+  ]],
+  ["Money & Goals", [
+    ["💰", "Savings", "save money"], ["🏦", "Bank", "financial"], ["📊", "Investing", "stocks chart"], ["📉", "Losses", "down chart"],
+    ["📌", "Reserve", "hold"], ["🚨", "Emergency fund", "urgent"], ["🎯", "Goal", "target"], ["🐷", "Piggy bank", "savings"],
+    ["🪙", "Coins", "cash"], ["💸", "Spending", "money out"], ["🧮", "Budget", "calculator"], ["📅", "Monthly", "calendar"]
+  ]],
+  ["Symbols", [
+    ["⚡", "Quick", "fast"], ["✨", "Misc", "sparkle"], ["🌟", "Treat", "star"], ["✅", "Done", "check"],
+    ["📍", "Location", "pin"], ["🔒", "Secure", "lock"], ["🔔", "Reminder", "bell"], ["🧲", "Supplies", "magnet"],
+    ["🔧", "Fix", "repair"], ["💬", "Messages", "chat"], ["📎", "Attachment", "clip"], ["❓", "Unknown", "question"]
+  ]]
+]
+
 function icon(name, label = "", className = "") {
   const body = ICON_PATHS[name] || ICON_PATHS.dashboard
   const aria = label ? `role="img" aria-label="${attr(label)}"` : 'aria-hidden="true"'
@@ -809,6 +1002,67 @@ function haptic(type = "light") {
 function secondaryBackView(defaultView = "account") {
   const secondaryViews = ["cats", "presets", "wishes"]
   return app.returnView && !secondaryViews.includes(app.returnView) ? app.returnView : defaultView
+}
+
+function iconPickerValue(target) {
+  if (target === "category") return app.drafts.category.icon || "🏷️"
+  if (target === "budgetEdit") return app.drafts.budgetEdit.icon || "🏷️"
+  if (target === "preset") return app.drafts.preset.icon || "⚡"
+  if (target === "presetEdit") return app.drafts.presetEdit.icon || "⚡"
+  if (target === "wish") return app.drafts.wish.icon || "✨"
+  if (target === "wishEdit") return app.drafts.wishEdit.icon || "✨"
+  return "✨"
+}
+
+function iconPickerButton(target, label = "Choose icon") {
+  const value = iconPickerValue(target)
+  return `
+    <button class="icon-picker-btn" type="button" data-action="openIconPicker" data-target="${attr(target)}">
+      <span class="icon-picker-preview">${esc(value)}</span>
+      <span>${esc(label)}</span>
+    </button>
+  `
+}
+
+function normalizeIconSearch(value) {
+  return String(value || "")
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .trim()
+}
+
+function iconChoiceValue(choice) {
+  return Array.isArray(choice) ? choice[0] : choice.value
+}
+
+function iconChoiceLabel(choice) {
+  return Array.isArray(choice) ? choice[1] : choice.label
+}
+
+function iconChoiceKeywords(choice) {
+  return Array.isArray(choice) ? choice[2] || "" : choice.keywords || ""
+}
+
+function filteredIconGroups() {
+  const query = normalizeIconSearch(app.iconPickerQuery)
+  if (!query) return ICON_PICKER_GROUPS
+
+  return ICON_PICKER_GROUPS
+    .map(([group, choices]) => {
+      const groupText = normalizeIconSearch(group)
+      const filtered = choices.filter(choice => {
+        const text = normalizeIconSearch([
+          groupText,
+          iconChoiceValue(choice),
+          iconChoiceLabel(choice),
+          iconChoiceKeywords(choice)
+        ].join(" "))
+        return text.includes(query)
+      })
+      return [group, filtered]
+    })
+    .filter(([, choices]) => choices.length)
 }
 
 function header(title, subtitle, actions = "") {
@@ -858,7 +1112,7 @@ function renderHome() {
   const installButton = app.installPrompt
     ? `<button class="top-btn icon-btn" title="Install" aria-label="Install" data-action="install">${icon("download")}</button>`
     : ""
-  const cloudTitle = app.cloudUser ? "Cloud connected" : "Connect cloud"
+  const cloudTitle = app.cloudUser ? "Backup connected" : "Set up backup"
   const cloudButton = `<button class="top-btn icon-btn cloud-btn ${app.cloudUser ? "online" : ""} ${app.cloudBusy ? "syncing" : ""}" title="${cloudTitle}" aria-label="${cloudTitle}" data-action="go" data-view="account">${icon("cloud")}</button>`
 
   return `
@@ -1033,22 +1287,17 @@ function renderLogItem(entry) {
   const color = cssColor(cat.color || "#0F766E")
 
   return `
-    <div class="card log-item">
-      <div class="list-row">
-        <button class="list-left" data-action="openEntryEdit" data-id="${Number(entry.id)}">
-          <span class="emoji-box" style="background:${color}16;color:${color}">${esc(cat.icon || "·")}</span>
-          <span>
-            <span class="row-title">${esc(entry.desc || "Expense")}</span>
-            <span class="row-meta">${esc(cat.label || entry.cat || "Uncategorized")}</span>
-          </span>
-        </button>
-        <button class="budget-right" data-action="openEntryEdit" data-id="${Number(entry.id)}">
-          <span class="row-amount">${fmt(entry.amt)}</span>
-          <span class="row-date">${esc(entry.date || "")}</span>
-        </button>
-        <button class="delete-circle" title="Delete" aria-label="Delete" data-action="deleteEntry" data-id="${Number(entry.id)}">${icon("trash")}</button>
-      </div>
-    </div>
+    <button class="card log-item safe-row" data-action="openEntryEdit" data-id="${Number(entry.id)}">
+      <span class="emoji-box" style="background:${color}16;color:${color}">${esc(cat.icon || "·")}</span>
+      <span class="row-copy">
+        <span class="row-title clamp-2">${esc(entry.desc || "Expense")}</span>
+        <span class="row-meta clamp-1">${esc(cat.label || entry.cat || "Uncategorized")}</span>
+      </span>
+      <span class="row-side">
+        <span class="row-amount">${fmt(entry.amt)}</span>
+        <span class="row-date">${esc(entry.date || "")}</span>
+      </span>
+    </button>
   `
 }
 
@@ -1061,13 +1310,13 @@ function renderCategories() {
         <span></span>
       </div>
 
-      <div class="form-card">
+      <div class="form-card compact-form">
         <div class="section-label">New budget</div>
-        <div class="two-col" style="margin-top:9px">
-          <input class="field emoji-input" id="cat-icon" type="text" maxlength="2" placeholder="Emoji" value="${attr(app.drafts.category.icon)}">
+        <div class="two-col icon-name-grid" style="margin-top:9px">
+          ${iconPickerButton("category")}
           <input class="field" id="cat-label" type="text" placeholder="Name" value="${attr(app.drafts.category.label)}">
         </div>
-        <div class="field-group">
+        <div class="field-group compact-field">
           <input class="field" id="cat-budget" type="number" inputmode="decimal" placeholder="Base monthly limit" value="${attr(app.drafts.category.budget)}">
         </div>
         <button class="primary-btn" id="save-category" data-action="addCategory" ${canAddCategory() ? "" : "disabled"}>${icon("add")} Add Budget</button>
@@ -1088,24 +1337,19 @@ function renderCategoryManagerCard(budget) {
   const effective = Number(budget.budget) || 0
 
   return `
-    <div class="card cat-card" style="--cat:${cssColor(budget.color)}">
+    <button class="card cat-card budget-manage-card" data-action="openBudgetEdit" data-id="${attr(budget.id)}" style="--cat:${cssColor(budget.color)};--cat-soft:${cssColor(budget.color)}16">
       <div class="cat-top">
         <div class="cat-left">
           <span class="cat-dot"></span>
           <span class="cat-title">
-            <span class="cat-icon">${esc(budget.icon)}</span>
-            <span class="cat-text">${esc(budget.label)}</span>
+            <span class="emoji-box cat-manage-icon">${esc(budget.icon)}</span>
+            <span class="cat-text clamp-1">${esc(budget.label)}</span>
           </span>
         </div>
         <div class="cat-budget">Base ${fmt(base)}</div>
       </div>
-      <div class="cat-meta">${roll ? esc(roll) : "No rollover"} · effective this month ${fmt(effective)}</div>
-      <div class="cat-actions">
-        <input class="mini-field cat-budget-input" data-id="${attr(budget.id)}" type="number" inputmode="decimal" value="${base}" aria-label="${attr(budget.label)} limit">
-        <button class="small-save" data-action="saveCategoryBudget" data-id="${attr(budget.id)}">${icon("check")} Save</button>
-        <button class="small-delete" data-action="deleteCategory" data-id="${attr(budget.id)}">${icon("trash")} Delete</button>
-      </div>
-    </div>
+      <div class="cat-meta">${roll ? esc(roll) : "No rollover"} · effective ${fmt(effective)}</div>
+    </button>
   `
 }
 
@@ -1117,10 +1361,10 @@ function renderPresets() {
         <div class="title">Presets</div>
         <span></span>
       </div>
-      <div class="form-card">
+      <div class="form-card compact-form">
         <div class="section-label">New preset</div>
-        <div class="two-col" style="margin-top:9px">
-          <input class="field emoji-input" id="preset-icon" type="text" maxlength="2" placeholder="Emoji" value="${attr(app.drafts.preset.icon)}">
+        <div class="two-col icon-name-grid" style="margin-top:9px">
+          ${iconPickerButton("preset")}
           <input class="field" id="preset-desc" type="text" placeholder="Name / description" value="${attr(app.drafts.preset.desc)}">
         </div>
         <div class="field-group">
@@ -1146,18 +1390,14 @@ function renderPresetCard(preset) {
   const color = cssColor(cat.color || "#0F766E")
 
   return `
-    <div class="card preset-card">
-      <div class="list-row">
-        <div class="list-left">
-          <span class="emoji-box" style="background:${color}16;color:${color}">${esc(preset.icon || cat.icon || "⚡")}</span>
-          <span>
-            <span class="row-title">${esc(preset.desc)}</span>
-            <span class="row-meta">${fmt(preset.amt)} · ${esc(cat.label || "Uncategorized")}</span>
-          </span>
-        </div>
-        <button class="small-delete" data-action="deletePreset" data-id="${attr(preset.id)}">${icon("trash")} Delete</button>
-      </div>
-    </div>
+    <button class="card preset-card safe-row" data-action="openPresetEdit" data-id="${attr(preset.id)}">
+      <span class="emoji-box" style="background:${color}16;color:${color}">${esc(preset.icon || cat.icon || "⚡")}</span>
+      <span class="row-copy">
+        <span class="row-title clamp-2">${esc(preset.desc)}</span>
+        <span class="row-meta clamp-2">${fmt(preset.amt)} · ${esc(cat.label || "Uncategorized")}</span>
+      </span>
+      <span class="row-side subtle-side">${icon("back", "", "chevron-next")}</span>
+    </button>
   `
 }
 
@@ -1169,10 +1409,10 @@ function renderWishes() {
         <div class="title">Wishlist</div>
         <span></span>
       </div>
-      <div class="form-card">
+      <div class="form-card compact-form">
         <div class="section-label">New wish</div>
-        <div class="two-col" style="margin-top:9px">
-          <input class="field emoji-input" id="wish-icon" type="text" maxlength="2" placeholder="Emoji" value="${attr(app.drafts.wish.icon)}">
+        <div class="two-col icon-name-grid" style="margin-top:9px">
+          ${iconPickerButton("wish")}
           <input class="field" id="wish-desc" type="text" placeholder="What do you want to buy?" value="${attr(app.drafts.wish.desc)}">
         </div>
         <div class="field-group">
@@ -1198,21 +1438,14 @@ function renderWishCard(wish) {
   const color = cssColor(cat.color || "#0F766E")
 
   return `
-    <div class="card preset-card">
-      <div class="list-row">
-        <button class="list-left" data-action="openWishEdit" data-id="${attr(wish.id)}">
-          <span class="emoji-box" style="background:${color}16;color:${color}">${esc(wish.icon || "✨")}</span>
-          <span>
-            <span class="row-title">${esc(wish.desc)}</span>
-            <span class="row-meta">${fmt(wish.amt)} · ${esc(cat.label || "Uncategorized")}</span>
-          </span>
-        </button>
-        <div class="list-actions">
-          <button class="success-btn" data-action="buyWish" data-id="${attr(wish.id)}">${icon("check")} Buy</button>
-          <button class="small-delete" data-action="deleteWish" data-id="${attr(wish.id)}">${icon("trash")} Delete</button>
-        </div>
-      </div>
-    </div>
+    <button class="card preset-card safe-row" data-action="openWishEdit" data-id="${attr(wish.id)}">
+      <span class="emoji-box" style="background:${color}16;color:${color}">${esc(wish.icon || "✨")}</span>
+      <span class="row-copy">
+        <span class="row-title clamp-2">${esc(wish.desc)}</span>
+        <span class="row-meta clamp-2">${fmt(wish.amt)} · ${esc(cat.label || "Uncategorized")}</span>
+      </span>
+      <span class="row-side subtle-side">${icon("back", "", "chevron-next")}</span>
+    </button>
   `
 }
 
@@ -1221,7 +1454,7 @@ function renderCategoryPills(selectedId, action) {
     const color = cssColor(cat.color)
     return `
       <button class="pill ${selectedId === cat.id ? "active" : ""}" style="--cat:${color};--cat-soft:${color}16" data-action="${action}" data-id="${attr(cat.id)}">
-        ${esc(cat.icon)} ${esc(cat.label)}
+        <span>${esc(cat.icon)}</span><span class="pill-text">${esc(cat.label)}</span>
       </button>
     `
   }).join("")
@@ -1237,30 +1470,38 @@ function getDataSummary() {
     monthCount: monthKeys.length,
     txCount: monthKeys.reduce((sum, key) => sum + (Array.isArray(app.data[key]) ? app.data[key].length : 0), 0),
     saved: savedTimeLabel(app.data._settings._meta.lastSaved, "not saved yet"),
-    cloudSaved: savedTimeLabel(app.lastCloudSyncAt, "pending")
+    cloudSaved: savedTimeLabel(app.lastCloudSyncAt, "not synced yet")
   }
 }
 
 function renderCloudPanel() {
   const summary = getDataSummary()
-  const cloudMode = app.cloudUser
+  const mode = app.drafts.cloud.mode || "signin"
+  const signedIn = !!app.cloudUser
+  const statusTitle = app.cloudBusy ? "Syncing..." : signedIn ? "Backup is on" : "Sign in to back up"
+  const statusCopy = signedIn
+    ? (app.cloudBusy ? "Saving your latest changes..." : `Last synced ${esc(summary.cloudSaved)}`)
+    : "Your budget stays on this device until you sign in."
+  const cloudMode = signedIn
     ? `
-      <div class="cloud-account">
+      <div class="cloud-account backup-account">
         <span>${esc(app.cloudEmail || "Signed in")}</span>
-        <span>${esc(summary.cloudSaved)}</span>
-      </div>
-      <div class="sheet-actions">
-        <button class="secondary-btn" data-action="cloudPull" ${app.cloudBusy ? "disabled" : ""}>${icon("download")} Pull Cloud</button>
-        <button class="primary-btn" data-action="cloudPush" ${app.cloudBusy ? "disabled" : ""}>${icon("upload")} Push Now</button>
+        <span>${esc(app.cloudStatus)}</span>
       </div>
       <button class="danger-btn cloud-full" data-action="cloudSignOut" ${app.cloudBusy ? "disabled" : ""}>${icon("account")} Sign Out</button>
     `
     : `
+      ${mode === "code" ? "" : `
+        <div class="auth-tabs" role="group" aria-label="Account mode">
+          <button class="${mode === "signin" ? "active" : ""}" data-action="setAuthMode" data-mode="signin">Sign in</button>
+          <button class="${mode === "signup" ? "active" : ""}" data-action="setAuthMode" data-mode="signup">Create</button>
+        </div>
+      `}
       <div class="field-group cloud-login">
         <div class="field-label">Email</div>
         <input class="field" id="cloud-email" type="email" inputmode="email" autocomplete="email" autocapitalize="off" spellcheck="false" placeholder="you@email.com" value="${attr(app.drafts.cloud.email)}">
       </div>
-      ${app.drafts.cloud.codeSent ? `
+      ${mode === "code" && app.drafts.cloud.codeSent ? `
         <div class="field-group cloud-login">
           <div class="field-label">Code</div>
           <input class="field code-field" id="cloud-code" type="text" inputmode="numeric" autocomplete="one-time-code" maxlength="6" placeholder="000000" value="${attr(app.drafts.cloud.code)}">
@@ -1270,24 +1511,39 @@ function renderCloudPanel() {
           <button class="primary-btn" data-action="cloudVerify" ${app.cloudBusy ? "disabled" : ""}>${icon("check")} Verify</button>
         </div>
       ` : `
-        <button class="primary-btn" data-action="cloudLogin" ${app.cloudBusy ? "disabled" : ""}>${icon("cloud")} Send Code</button>
+        ${mode === "code" ? "" : `
+          <div class="field-group cloud-login">
+            <div class="field-label">Password</div>
+            <input class="field" id="cloud-password" type="password" autocomplete="${mode === "signup" ? "new-password" : "current-password"}" placeholder="Password" value="${attr(app.drafts.cloud.password)}">
+          </div>
+        `}
+        ${mode === "signup" ? `
+          <button class="primary-btn" data-action="cloudCreateAccount" ${app.cloudBusy ? "disabled" : ""}>${icon("account")} Create Account</button>
+        ` : mode === "code" ? `
+          <button class="primary-btn" data-action="cloudLogin" ${app.cloudBusy ? "disabled" : ""}>${icon("check")} Send Code</button>
+        ` : `
+          <button class="primary-btn" data-action="cloudPasswordLogin" ${app.cloudBusy ? "disabled" : ""}>${icon("check")} Sign In</button>
+          <button class="text-btn auth-link" data-action="cloudResetPassword">Forgot password?</button>
+        `}
       `}
+      ${app.drafts.cloud.resetSent ? `<div class="cloud-status">Password reset email sent.</div>` : ""}
+      <button class="text-btn auth-link" data-action="setAuthMode" data-mode="${mode === "code" ? "signin" : "code"}">${mode === "code" ? "Use password instead" : "Use email code instead"}</button>
     `
 
   return `
-    <div class="cloud-panel ${app.cloudUser ? "connected" : ""}">
+    <div class="cloud-panel backup-panel ${signedIn ? "connected" : ""}">
       <div class="cloud-head">
         <div>
-          <div class="cloud-kicker">Supabase</div>
-          <div class="cloud-title">${app.cloudUser ? "Automatic sync is active" : "Cloud sync"}</div>
+          <div class="cloud-kicker">Backup</div>
+          <div class="cloud-title">${esc(statusTitle)}</div>
         </div>
-        <span class="cloud-dot ${app.cloudBusy ? "busy" : app.cloudUser ? "on" : ""}"></span>
+        <span class="cloud-dot ${app.cloudBusy ? "busy" : signedIn ? "on" : ""}"></span>
       </div>
       <div class="data-note cloud-copy">
-        ${app.cloudUser ? "Changes upload automatically after you save. You can also push or pull manually." : "Use the email code flow so your session stays inside the installed PWA."}
+        ${statusCopy}
       </div>
       ${cloudMode}
-      <div class="cloud-status">${esc(app.cloudStatus)}</div>
+      <div class="cloud-status">${signedIn ? "Everything saves automatically." : esc(app.cloudStatus)}</div>
     </div>
   `
 }
@@ -1389,9 +1645,12 @@ function renderModal() {
   modalEl.setAttribute("aria-hidden", "false")
 
   if (app.modal === "catPicker") modalEl.innerHTML = renderCatPickerModal()
+  if (app.modal === "budgetEdit") modalEl.innerHTML = renderBudgetEditModal()
+  if (app.modal === "presetEdit") modalEl.innerHTML = renderPresetEditModal()
   if (app.modal === "entryEdit") modalEl.innerHTML = renderEntryEditModal()
   if (app.modal === "wishEdit") modalEl.innerHTML = renderWishEditModal()
   if (app.modal === "data") modalEl.innerHTML = renderDataModal()
+  if (app.modal === "iconPicker") modalEl.innerHTML = renderIconPickerModal()
 }
 
 function renderCatPickerModal() {
@@ -1451,6 +1710,64 @@ function renderEntryEditModal() {
   `
 }
 
+function renderBudgetEditModal() {
+  const budget = rawCategoryById(app.editingBudgetId)
+  if (!budget) {
+    closeModal()
+    return ""
+  }
+
+  return `
+    <div class="sheet" role="dialog" aria-modal="true" aria-label="Edit budget">
+      <div class="sheet-top">
+        <div class="sheet-title">Edit budget</div>
+        <button class="sheet-close" aria-label="Close" data-action="closeModal">${icon("close")}</button>
+      </div>
+      <div class="two-col icon-name-grid">
+        ${iconPickerButton("budgetEdit")}
+        <input class="field" id="budget-edit-label" type="text" placeholder="Name" value="${attr(app.drafts.budgetEdit.label)}">
+      </div>
+      <div class="field-group">
+        <div class="field-label">Base monthly limit</div>
+        <input class="field" id="budget-edit-amount" type="number" inputmode="decimal" placeholder="$0.00" value="${attr(app.drafts.budgetEdit.budget)}">
+      </div>
+      <button class="primary-btn" data-action="saveEditingBudget">${icon("check")} Save Budget</button>
+      <button class="danger-btn cloud-full" data-action="deleteEditingBudget">${icon("trash")} Delete Budget</button>
+    </div>
+  `
+}
+
+function renderPresetEditModal() {
+  const preset = presetById(app.editingPresetId)
+  if (!preset) {
+    closeModal()
+    return ""
+  }
+
+  return `
+    <div class="sheet" role="dialog" aria-modal="true" aria-label="Edit preset">
+      <div class="sheet-top">
+        <div class="sheet-title">Edit preset</div>
+        <button class="sheet-close" aria-label="Close" data-action="closeModal">${icon("close")}</button>
+      </div>
+      <div class="two-col icon-name-grid">
+        ${iconPickerButton("presetEdit")}
+        <input class="field" id="preset-edit-desc" type="text" placeholder="Name / description" value="${attr(app.drafts.presetEdit.desc)}">
+      </div>
+      <div class="field-group">
+        <div class="field-label">Amount</div>
+        <input class="field" id="preset-edit-amt" type="number" inputmode="decimal" placeholder="$0.00" value="${attr(app.drafts.presetEdit.amt)}">
+      </div>
+      <div class="field-label">Category</div>
+      <div class="pill-wrap">
+        ${renderCategoryPills(app.editingPresetCat, "pickPresetEditCat")}
+      </div>
+      <button class="primary-btn" data-action="saveEditingPreset">${icon("check")} Save Preset</button>
+      <button class="danger-btn cloud-full" data-action="deleteEditingPreset">${icon("trash")} Delete Preset</button>
+    </div>
+  `
+}
+
 function renderWishEditModal() {
   const wish = wishById(app.editingWishId)
   if (!wish) {
@@ -1464,8 +1781,8 @@ function renderWishEditModal() {
         <div class="sheet-title">Edit wish</div>
         <button class="sheet-close" aria-label="Close" data-action="closeModal">${icon("close")}</button>
       </div>
-      <div class="two-col">
-        <input class="field emoji-input" id="wish-edit-icon" type="text" maxlength="2" placeholder="Emoji" value="${attr(app.drafts.wishEdit.icon)}">
+      <div class="two-col icon-name-grid">
+        ${iconPickerButton("wishEdit")}
         <input class="field" id="wish-edit-desc" type="text" placeholder="What do you want to buy?" value="${attr(app.drafts.wishEdit.desc)}">
       </div>
       <div class="field-group">
@@ -1499,6 +1816,39 @@ function renderDataModal() {
       </div>
       ${renderCloudPanel()}
       ${renderBackupPanel()}
+    </div>
+  `
+}
+
+function renderIconPickerModal() {
+  const target = app.iconPickerTarget
+  const selected = iconPickerValue(target)
+  const groups = filteredIconGroups()
+
+  return `
+    <div class="sheet icon-sheet" role="dialog" aria-modal="true" aria-label="Choose icon">
+      <div class="sheet-top">
+        <div class="sheet-title">Choose icon</div>
+        <button class="sheet-close" aria-label="Close" data-action="closeModal">${icon("close")}</button>
+      </div>
+      <input class="field icon-search" id="icon-search" type="search" placeholder="Search coffee, rent, travel..." value="${attr(app.iconPickerQuery)}">
+      <div class="icon-groups">
+        ${groups.length ? groups.map(([label, values]) => `
+          <div class="icon-group">
+            <div class="section-label">${esc(label)}</div>
+            <div class="icon-grid">
+              ${values.map(choice => {
+                const value = iconChoiceValue(choice)
+                const labelText = iconChoiceLabel(choice)
+                return `
+                <button class="icon-choice ${selected === value ? "active" : ""}" title="${attr(labelText)}" aria-label="${attr(labelText)}" data-action="chooseIcon" data-value="${attr(value)}">
+                  ${esc(value)}
+                </button>
+              `}).join("")}
+            </div>
+          </div>
+        `).join("") : `<div class="empty icon-empty"><div class="empty-title">No matches</div><div class="row-meta">Try another word.</div></div>`}
+      </div>
     </div>
   `
 }
@@ -1555,39 +1905,53 @@ function handleInput(event) {
 
   if (target.id === "add-desc") app.drafts.add.desc = target.value
 
-  if (target.id === "cat-icon") app.drafts.category.icon = target.value
   if (target.id === "cat-label") app.drafts.category.label = target.value
   if (target.id === "cat-budget") app.drafts.category.budget = target.value
-  if (["cat-icon", "cat-label", "cat-budget"].includes(target.id)) {
+  if (["cat-label", "cat-budget"].includes(target.id)) {
     updateButtonState("save-category", canAddCategory())
   }
 
-  if (target.id === "preset-icon") app.drafts.preset.icon = target.value
   if (target.id === "preset-desc") app.drafts.preset.desc = target.value
   if (target.id === "preset-amt") app.drafts.preset.amt = target.value
-  if (["preset-icon", "preset-desc", "preset-amt"].includes(target.id)) {
+  if (["preset-desc", "preset-amt"].includes(target.id)) {
     updateButtonState("save-preset", canAddPreset())
   }
 
-  if (target.id === "wish-icon") app.drafts.wish.icon = target.value
   if (target.id === "wish-desc") app.drafts.wish.desc = target.value
   if (target.id === "wish-amt") app.drafts.wish.amt = target.value
-  if (["wish-icon", "wish-desc", "wish-amt"].includes(target.id)) {
+  if (["wish-desc", "wish-amt"].includes(target.id)) {
     updateButtonState("save-wish", canAddWish())
   }
+
+  if (target.id === "budget-edit-label") app.drafts.budgetEdit.label = target.value
+  if (target.id === "budget-edit-amount") app.drafts.budgetEdit.budget = target.value
+
+  if (target.id === "preset-edit-desc") app.drafts.presetEdit.desc = target.value
+  if (target.id === "preset-edit-amt") app.drafts.presetEdit.amt = target.value
 
   if (target.id === "edit-desc") app.drafts.edit.desc = target.value
   if (target.id === "edit-amt") app.drafts.edit.amt = target.value
 
-  if (target.id === "wish-edit-icon") app.drafts.wishEdit.icon = target.value
   if (target.id === "wish-edit-desc") app.drafts.wishEdit.desc = target.value
   if (target.id === "wish-edit-amt") app.drafts.wishEdit.amt = target.value
 
   if (target.id === "cloud-email") app.drafts.cloud.email = target.value
+  if (target.id === "cloud-password") app.drafts.cloud.password = target.value
   if (target.id === "cloud-code") {
     const code = target.value.replace(/\D/g, "").slice(0, 6)
     app.drafts.cloud.code = code
     target.value = code
+  }
+
+  if (target.id === "icon-search") {
+    app.iconPickerQuery = target.value
+    renderModal()
+    requestAnimationFrame(() => {
+      const search = document.getElementById("icon-search")
+      if (!search) return
+      search.focus()
+      search.setSelectionRange(search.value.length, search.value.length)
+    })
   }
 }
 
@@ -1601,6 +1965,9 @@ function handleClick(event) {
   const action = target.dataset.action
   const id = target.dataset.id
   const view = target.dataset.view
+  const mode = target.dataset.mode
+  const targetName = target.dataset.target
+  const value = target.dataset.value
 
   if (action === "go") go(view)
   if (action === "quickAdd") quickAdd(id)
@@ -1612,8 +1979,15 @@ function handleClick(event) {
   if (action === "addCategory") addCategory()
   if (action === "saveCategoryBudget") saveCategoryBudget(id)
   if (action === "deleteCategory") deleteCategory(id)
+  if (action === "openBudgetEdit") openBudgetEdit(id)
+  if (action === "saveEditingBudget") saveEditingBudget()
+  if (action === "deleteEditingBudget") deleteEditingBudget()
   if (action === "addPreset") addPreset()
   if (action === "deletePreset") deletePreset(id)
+  if (action === "openPresetEdit") openPresetEdit(id)
+  if (action === "pickPresetEditCat") pickPresetEditCat(id)
+  if (action === "saveEditingPreset") saveEditingPreset()
+  if (action === "deleteEditingPreset") deleteEditingPreset()
   if (action === "pickPresetCat") pickPresetCat(id)
   if (action === "addWish") addWish()
   if (action === "deleteWish") deleteWish(id)
@@ -1633,12 +2007,18 @@ function handleClick(event) {
   if (action === "exportJSON") exportJSON()
   if (action === "exportCSV") exportCSV()
   if (action === "importJSON") importJSON()
+  if (action === "setAuthMode") setAuthMode(mode)
+  if (action === "cloudPasswordLogin") signInWithPassword()
+  if (action === "cloudCreateAccount") createPasswordAccount()
+  if (action === "cloudResetPassword") sendPasswordReset()
   if (action === "cloudLogin") sendEmailCode()
   if (action === "cloudVerify") verifyEmailCode()
   if (action === "cloudPush") pushCloudData()
-  if (action === "cloudPull" && confirm("This will replace this local copy with the data in Supabase.")) pullCloudData()
+  if (action === "cloudPull" && confirm("This will replace this local copy with your saved backup.")) pullCloudData()
   if (action === "cloudSignOut") signOutCloud()
   if (action === "install") installPWA()
+  if (action === "openIconPicker") openIconPicker(targetName)
+  if (action === "chooseIcon") chooseIcon(value)
   if (action === "closeModal") closeModal()
 }
 
@@ -1671,11 +2051,26 @@ function openModal(name) {
 }
 
 function closeModal(shouldRender = true) {
+  if (app.modal === "iconPicker" && app.iconPickerReturnModal) {
+    app.modal = app.iconPickerReturnModal
+    app.iconPickerReturnModal = null
+    app.iconPickerTarget = null
+    app.iconPickerQuery = ""
+    if (shouldRender) renderModal()
+    return
+  }
+
   app.modal = null
+  app.editingBudgetId = null
+  app.editingPresetId = null
+  app.editingPresetCat = null
   app.editingEntryId = null
   app.editingCat = null
   app.editingWishId = null
   app.editingWishCat = null
+  app.iconPickerTarget = null
+  app.iconPickerReturnModal = null
+  app.iconPickerQuery = ""
   if (shouldRender) renderModal()
 }
 
@@ -1686,6 +2081,45 @@ function chooseCat(id) {
   closeModal(false)
   render()
   toast("Category selected")
+}
+
+function setAuthMode(mode) {
+  app.drafts.cloud.mode = ["signin", "signup", "code"].includes(mode) ? mode : "signin"
+  app.drafts.cloud.codeSent = false
+  app.drafts.cloud.resetSent = false
+  render()
+}
+
+function openIconPicker(target) {
+  if (!target) return
+  app.iconPickerTarget = target
+  app.iconPickerQuery = ""
+  app.iconPickerReturnModal = app.modal && app.modal !== "iconPicker" ? app.modal : null
+  app.modal = "iconPicker"
+  haptic("light")
+  renderModal()
+}
+
+function chooseIcon(value) {
+  if (!value) return
+  const target = app.iconPickerTarget
+
+  if (target === "category") app.drafts.category.icon = value
+  if (target === "budgetEdit") app.drafts.budgetEdit.icon = value
+  if (target === "preset") app.drafts.preset.icon = value
+  if (target === "presetEdit") app.drafts.presetEdit.icon = value
+  if (target === "wish") app.drafts.wish.icon = value
+  if (target === "wishEdit") app.drafts.wishEdit.icon = value
+
+  const returnModal = app.iconPickerReturnModal
+  app.iconPickerTarget = null
+  app.iconPickerReturnModal = null
+  app.iconPickerQuery = ""
+  app.modal = returnModal || null
+  haptic("light")
+
+  if (app.modal) renderModal()
+  else render()
 }
 
 function saveExpense() {
@@ -1759,7 +2193,57 @@ function saveCategoryBudget(id) {
   toast("Limit updated")
 }
 
-function deleteCategory(id) {
+function openBudgetEdit(id) {
+  const budget = rawCategoryById(id)
+  if (!budget) return
+  app.editingBudgetId = budget.id
+  app.drafts.budgetEdit = {
+    icon: budget.icon || "🏷️",
+    label: budget.label || "",
+    budget: String(Number(budget.budget) || "")
+  }
+  openModal("budgetEdit")
+}
+
+function saveEditingBudget() {
+  const budget = rawCategoryById(app.editingBudgetId)
+  const label = app.drafts.budgetEdit.label.trim()
+  const amount = Number(app.drafts.budgetEdit.budget)
+
+  if (!budget || !label || amount <= 0) {
+    toast("Check the budget details")
+    return
+  }
+
+  const duplicate = app.data._settings.budgets.some(b =>
+    b.id !== budget.id && b.label.trim().toLowerCase() === label.toLowerCase()
+  )
+
+  if (duplicate) {
+    toast("That budget already exists")
+    return
+  }
+
+  budget.label = label
+  budget.budget = amount
+  budget.icon = app.drafts.budgetEdit.icon.trim() || "🏷️"
+  closeModal(false)
+  saveData(app.data)
+  render()
+  haptic("success")
+  toast("Budget updated")
+}
+
+function deleteEditingBudget() {
+  const id = app.editingBudgetId
+  const budget = rawCategoryById(id)
+  if (!budget) return
+  if (!confirm(`Delete ${budget.label}? Its expenses, presets, and wishes will also be deleted.`)) return
+  closeModal(false)
+  deleteCategory(id, { confirmed: true })
+}
+
+function deleteCategory(id, options = {}) {
   if (app.data._settings.budgets.length <= 1) {
     toast("Keep at least 1 budget")
     return
@@ -1767,7 +2251,7 @@ function deleteCategory(id) {
 
   const cat = rawCategoryById(id)
   if (!cat) return
-  if (!confirm(`Delete ${cat.label}? Its expenses, presets, and wishes will also be deleted.`)) return
+  if (!options.confirmed && !confirm(`Delete ${cat.label}? Its expenses, presets, and wishes will also be deleted.`)) return
 
   app.data._settings.budgets = app.data._settings.budgets.filter(b => b.id !== id)
   Object.keys(app.data).forEach(key => {
@@ -1809,7 +2293,11 @@ function addPreset() {
   toast("Preset created")
 }
 
-function deletePreset(id) {
+function deletePreset(id, options = {}) {
+  const preset = presetById(id)
+  if (!preset) return
+  if (!options.confirmed && !confirm(`Delete "${preset.desc}"?`)) return
+
   app.data._settings.deletedPresetIds = app.data._settings.deletedPresetIds || []
   if (!app.data._settings.deletedPresetIds.includes(id)) app.data._settings.deletedPresetIds.push(id)
   app.data._settings.presets = app.data._settings.presets.filter(preset => preset.id !== id)
@@ -1817,6 +2305,56 @@ function deletePreset(id) {
   render()
   haptic("warning")
   toast("Preset deleted")
+}
+
+function openPresetEdit(id) {
+  const preset = presetById(id)
+  if (!preset) return
+  app.editingPresetId = preset.id
+  app.editingPresetCat = preset.cat
+  app.drafts.presetEdit = {
+    icon: preset.icon || "⚡",
+    desc: preset.desc || "",
+    amt: String(Number(preset.amt) || "")
+  }
+  openModal("presetEdit")
+}
+
+function pickPresetEditCat(id) {
+  if (!categoryById(id)) return
+  app.editingPresetCat = id
+  renderModal()
+}
+
+function saveEditingPreset() {
+  const preset = presetById(app.editingPresetId)
+  const amount = Number(app.drafts.presetEdit.amt)
+  const desc = app.drafts.presetEdit.desc.trim()
+  const cat = categoryById(app.editingPresetCat)
+
+  if (!preset || !desc || amount <= 0 || !cat) {
+    toast("Check the preset details")
+    return
+  }
+
+  preset.desc = desc
+  preset.amt = amount
+  preset.cat = cat.id
+  preset.icon = app.drafts.presetEdit.icon.trim() || cat.icon || "⚡"
+  closeModal(false)
+  saveData(app.data)
+  render()
+  haptic("success")
+  toast("Preset updated")
+}
+
+function deleteEditingPreset() {
+  const preset = presetById(app.editingPresetId)
+  if (!preset) return
+  if (!confirm(`Delete "${preset.desc}"?`)) return
+  const id = preset.id
+  closeModal(false)
+  deletePreset(id, { confirmed: true })
 }
 
 function pickWishCat(id) {
@@ -1841,7 +2379,11 @@ function addWish() {
   toast("Wish saved")
 }
 
-function deleteWish(id) {
+function deleteWish(id, options = {}) {
+  const wish = wishById(id)
+  if (!wish) return
+  if (!options.confirmed && !confirm(`Delete "${wish.desc}" from your wishlist?`)) return
+
   app.data._settings.wishes = app.data._settings.wishes.filter(wish => wish.id !== id)
   saveData(app.data)
   render()
@@ -1913,8 +2455,11 @@ function saveEditingWish() {
 
 function deleteEditingWish() {
   const id = app.editingWishId
+  const wish = wishById(id)
+  if (!wish) return
+  if (!confirm(`Delete "${wish.desc}" from your wishlist?`)) return
   closeModal(false)
-  deleteWish(id)
+  deleteWish(id, { confirmed: true })
 }
 
 function buyEditingWish() {
@@ -1966,7 +2511,11 @@ function saveEditingEntry() {
   toast("Expense updated")
 }
 
-function deleteEntry(id) {
+function deleteEntry(id, options = {}) {
+  const entry = entryById(id)
+  if (!entry) return
+  if (!options.confirmed && !confirm(`Delete "${entry.desc || "Expense"}"?`)) return
+
   if (!Array.isArray(app.data[app.key])) return
   app.data[app.key] = app.data[app.key].filter(entry => Number(entry.id) !== Number(id))
   saveData(app.data)
@@ -1977,8 +2526,11 @@ function deleteEntry(id) {
 
 function deleteEditingEntry() {
   const id = app.editingEntryId
+  const entry = entryById(id)
+  if (!entry) return
+  if (!confirm(`Delete "${entry.desc || "Expense"}"?`)) return
   closeModal(false)
-  deleteEntry(id)
+  deleteEntry(id, { confirmed: true })
 }
 
 function saveEditingAsPreset() {

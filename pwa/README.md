@@ -23,13 +23,13 @@ Recommended publishing flow:
 
 ## Cloud saving
 
-The app saves locally first so it works offline. It also syncs with Supabase after you sign in with an email OTP code.
+The app saves locally first so it works offline. After you sign in with email and password, your data backs up automatically. Email code sign-in is available as a fallback.
 
 Connected project:
 
 1. Supabase project: `budget-tracker`.
 2. Table: `public.budget_sync`.
-3. Auth: email OTP code.
+3. Auth: email/password, with email code as a secondary option.
 4. Published PWA: `https://ezratawachi.github.io/scriptable-budget-tracker/pwa/`.
 
-When you connect your email for the first time, the PWA uploads your current data to Supabase if there is not already a cloud copy. After that, every expense, budget, preset, or wish syncs automatically.
+When you sign in for the first time, the PWA uploads your current data if there is not already a backup. After that, every expense, budget, preset, or wish syncs automatically.
