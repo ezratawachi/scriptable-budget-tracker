@@ -1,9 +1,9 @@
-const CACHE_NAME = "budget-pwa-v12"
+const CACHE_NAME = "budget-pwa-v13"
 const ASSETS = [
   "./",
   "./index.html",
-  "./styles.css",
-  "./app.js",
+  "./styles.css?v=13",
+  "./app.js?v=13",
   "./vendor/supabase.min.js",
   "./manifest.webmanifest",
   "./icons/icon-180.png",
@@ -36,6 +36,10 @@ self.addEventListener("activate", event => {
       .then(keys => Promise.all(keys.filter(key => key !== CACHE_NAME).map(key => caches.delete(key))))
       .then(() => self.clients.claim())
   )
+})
+
+self.addEventListener("message", event => {
+  if (event.data && event.data.type === "SKIP_WAITING") self.skipWaiting()
 })
 
 self.addEventListener("fetch", event => {
