@@ -232,6 +232,39 @@ function getSavedAt(data) {
   return Number(data?._settings?._meta?.lastSaved) || 0
 }
 
+function dataStats(data) {
+  const shaped = ensureDataShape(clone(data || {}))
+  const settings = shaped._settings || {}
+  const monthKeys = Object.keys(shaped).filter(key => key !== "_settings" && parseMonthKey(key))
+  const transactions = monthKeys.reduce((sum, key) => sum + (Array.isArray(shaped[key]) ? shaped[key].length : 0), 0)
+  const method = settings.method || {}
+  const methodStarted = !!(
+    Number(method.monthlyIncome) ||
+    Number(method.predictableExpensesTotal) ||
+    Number(method.intentionalPool) ||
+    Number(method.completedAt) ||
+    Number(method.dismissedAt)
+  )
+
+  return {
+    budgets: Array.isArray(settings.budgets) ? settings.budgets.length : 0,
+    presets: Array.isArray(settings.presets) ? settings.presets.length : 0,
+    wishes: Array.isArray(settings.wishes) ? settings.wishes.length : 0,
+    transactions,
+    methodStarted
+  }
+}
+
+function hasBudgetContent(data) {
+  const stats = dataStats(data)
+  return stats.budgets + stats.presets + stats.wishes + stats.transactions > 0
+}
+
+function hasUserContent(data) {
+  const stats = dataStats(data)
+  return stats.budgets + stats.presets + stats.wishes + stats.transactions > 0 || stats.methodStarted
+}
+
 function refreshCloudSurface() {
   if (app.view === "account") render()
   if (app.modal === "data") renderModal()
@@ -658,8 +691,10 @@ async function pullCloudData(options = {}) {
     const remoteData = ensureDataShape(clone(row.data))
     const remoteSavedAt = Math.max(getSavedAt(remoteData), Date.parse(row.updated_at) || 0)
     const localSavedAt = getSavedAt(app.data)
+    const localLooksEmpty = !hasBudgetContent(app.data)
+    const remoteHasContent = hasUserContent(remoteData)
 
-    if (preferNewer && localSavedAt > remoteSavedAt + 1000) {
+    if (preferNewer && localSavedAt > remoteSavedAt + 1000 && !(localLooksEmpty && remoteHasContent)) {
       app.cloudReady = true
       setCloudStatus("Saving latest changes...", true)
       const uploaded = await pushCloudData({ silent: true })
