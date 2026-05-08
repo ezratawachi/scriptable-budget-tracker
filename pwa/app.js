@@ -187,11 +187,12 @@ function ensureDataShape(data) {
     predictableExpensesTotal: Number(method.predictableExpensesTotal) || 0,
     intentionalPool: Number(method.intentionalPool) || 0,
     completedAt: Number(method.completedAt) || 0,
-    dismissedAt: Number(method.dismissedAt) || 0
+    dismissedAt: Number(method.dismissedAt) || 0,
+    introSeenAt: Number(method.introSeenAt) || 0
   }
 
   if (!d._settings._meta || typeof d._settings._meta !== "object") d._settings._meta = {}
-  d._settings._meta.schemaVersion = 6
+  d._settings._meta.schemaVersion = 7
   d._settings._meta.lastSaved = Number(d._settings._meta.lastSaved) || 0
 
   Object.keys(d).forEach(key => {
@@ -243,7 +244,8 @@ function dataStats(data) {
     Number(method.predictableExpensesTotal) ||
     Number(method.intentionalPool) ||
     Number(method.completedAt) ||
-    Number(method.dismissedAt)
+    Number(method.dismissedAt) ||
+    Number(method.introSeenAt)
   )
 
   return {
@@ -1249,8 +1251,6 @@ function renderHome() {
         <div class="bar-fill" style="width:${pct}%;background:${pct > 90 ? "var(--red)" : pct > 70 ? "var(--amb)" : "var(--acc)"}"></div>
       </div>
 
-      ${renderMethodCard()}
-
       <div class="scroll">
         <div class="category-list">
           ${budgetContent}
@@ -1259,38 +1259,6 @@ function renderHome() {
 
       ${nav()}
     </section>
-  `
-}
-
-function renderMethodCard() {
-  const complete = hasCompletedMethod()
-  const summary = getMethodSummary()
-  const over = complete && summary.unassigned < 0
-  const title = complete ? "Intentional spending pool" : "Set your method"
-  const copy = complete
-    ? over
-      ? "Your leak budgets are above the pool. Treat it as a signal, not a failure."
-      : "Stable expenses are accepted. These are the leaks you chose to manage."
-    : "Don't fight stable life expenses. Control the invisible leaks."
-  const actionLabel = complete ? "Adjust" : "Start"
-  const actionStep = complete ? 2 : 0
-
-  return `
-    <button class="method-card ${complete ? "complete" : ""}" data-action="openMethod" data-step="${actionStep}">
-      <span class="method-card-head">
-        <span>
-          <span class="method-kicker">Method</span>
-          <span class="method-title">${esc(title)}</span>
-        </span>
-        <span class="method-action">${actionLabel}</span>
-      </span>
-      <span class="method-copy">${esc(copy)}</span>
-      <span class="method-stats">
-        <span><strong>${complete ? fmt(summary.pool) : "--"}</strong><em>Pool</em></span>
-        <span><strong>${fmt(summary.budgeted)}</strong><em>Budgeted</em></span>
-        <span class="${over ? "danger" : ""}"><strong>${complete ? fmt(Math.abs(summary.unassigned)) : "--"}</strong><em>${over ? "Over" : "Unassigned"}</em></span>
-      </span>
-    </button>
   `
 }
 
@@ -1622,6 +1590,11 @@ function hasCompletedMethod() {
   return Number(getMethod().completedAt) > 0
 }
 
+function hasSeenMethodIntro() {
+  const method = getMethod()
+  return hasCompletedMethod() || Number(method.introSeenAt) > 0 || Number(method.dismissedAt) > 0
+}
+
 function getMethodBudgetTotal() {
   return app.data._settings.budgets
     .reduce((sum, budget) => sum + (Number(budget.budget) || 0), 0)
@@ -1660,9 +1633,9 @@ function canConfirmMethodPool() {
 }
 
 function shouldAutoOpenMethod() {
-  const method = getMethod()
-  if (app.methodAutoOpened || hasCompletedMethod() || Number(method.dismissedAt) > 0) return false
+  if (app.methodAutoOpened || hasSeenMethodIntro()) return false
   if (getTransactionCount(app.data) > 0) return false
+  if (hasBudgetContent(app.data)) return false
   return getSavedAt(app.data) === 0
 }
 
@@ -1672,7 +1645,7 @@ function maybeOpenInitialMethod() {
   window.setTimeout(() => {
     if (!shouldAutoOpenMethod() || app.modal || app.view !== "home") return
     app.methodAutoOpened = true
-    openMethod(0, { silent: true })
+    openMethodIntro({ silent: true })
   }, 1300)
 }
 
@@ -1858,7 +1831,7 @@ function renderAccount() {
             ${icon("settings", "", "panel-icon")}
           </div>
           <div class="tool-grid">
-            ${renderActionToolCard("openMethod", "wallet", "Method", hasCompletedMethod() ? "Intentional spending pool" : "Find your spending leaks", `data-step="${hasCompletedMethod() ? 2 : 0}"`)}
+            ${renderActionToolCard("openMethod", "wallet", "Method", hasCompletedMethod() ? "Edit intentional pool" : "Optional setup", `data-step="${hasCompletedMethod() ? 1 : 0}"`)}
             ${renderToolCard("cats", "grid", "Budgets", "Categories and monthly limits")}
             ${renderToolCard("presets", "settings", "Presets", "Reusable quick expenses")}
             ${renderToolCard("wishes", "heart", "Wishlist", "Planned purchases")}
@@ -1900,6 +1873,7 @@ function renderModal() {
   if (app.modal === "entryEdit") modalEl.innerHTML = renderEntryEditModal()
   if (app.modal === "wishEdit") modalEl.innerHTML = renderWishEditModal()
   if (app.modal === "data") modalEl.innerHTML = renderDataModal()
+  if (app.modal === "methodIntro") modalEl.innerHTML = renderMethodIntroModal()
   if (app.modal === "method") modalEl.innerHTML = renderMethodModal()
   if (app.modal === "iconPicker") modalEl.innerHTML = renderIconPickerModal()
 }
@@ -2078,9 +2052,8 @@ function renderDataModal() {
 }
 
 function renderMethodModal() {
-  const step = Math.max(0, Math.min(3, Number(app.methodStep) || 0))
+  const step = Math.max(0, Math.min(2, Number(app.methodStep) || 0))
   const steps = [
-    renderMethodIntroStep,
     renderMethodNumbersStep,
     renderMethodPoolStep,
     renderMethodReviewStep
@@ -2091,34 +2064,49 @@ function renderMethodModal() {
       <div class="sheet-top">
         <div>
           <div class="sheet-title">Budget Method</div>
-          <div class="method-step-label">Step ${step + 1} of 4</div>
+          <div class="method-step-label">Step ${step + 1} of 3</div>
         </div>
         <button class="sheet-close" aria-label="Close" data-action="dismissMethod">${icon("close")}</button>
       </div>
       <div class="method-progress" aria-hidden="true">
-        ${[0, 1, 2, 3].map(i => `<span class="${i <= step ? "active" : ""}"></span>`).join("")}
+        ${[0, 1, 2].map(i => `<span class="${i <= step ? "active" : ""}"></span>`).join("")}
       </div>
       ${steps[step]()}
     </div>
   `
 }
 
-function renderMethodIntroStep() {
+function renderMethodIntroModal() {
   return `
-    <div class="method-body">
-      <div class="method-hero">
-        <div class="method-kicker">Control the invisible leaks</div>
-        <div class="method-heading">Do not fight the stable expenses.</div>
-        <p>Groceries, bills, gas, and household basics may simply be the cost of your real life. The leaks are different: small, repeating purchases that quietly become unlimited.</p>
+    <div class="sheet method-story-sheet" role="dialog" aria-modal="true" aria-label="Welcome to Budget Tracker">
+      <div class="sheet-top">
+        <div>
+          <div class="method-kicker">Budget Tracker</div>
+          <div class="sheet-title">The budget that finally clicked</div>
+        </div>
+        <button class="sheet-close" aria-label="Close" data-action="dismissMethodIntro">${icon("close")}</button>
       </div>
-      <div class="method-principles">
-        <span>Accept predictable life expenses.</span>
-        <span>Choose the pool you want to spend intentionally.</span>
-        <span>Enjoy small luxuries without hidden stress.</span>
-      </div>
-      <div class="sheet-actions">
-        <button class="secondary-btn" data-action="dismissMethod">Maybe Later</button>
-        <button class="primary-btn" data-action="methodNext">${icon("check")} Start</button>
+      <div class="method-body">
+        <div class="method-hero story-hero">
+          <div class="method-heading">We tried tracking everything. It made budgeting feel heavier, not smarter.</div>
+          <p>Then we noticed something simple: groceries, bills, gas, and household basics were not the real problem. They were stable parts of real life.</p>
+        </div>
+        <div class="story-line">
+          The real problem was spending we actually enjoyed, but had stopped noticing. Small purchases felt harmless one by one, then quietly became unlimited.
+        </div>
+        <div class="story-quote">Do not fight stable life expenses. Control the invisible leaks.</div>
+        <div class="story-examples" aria-label="Leak examples">
+          <span>Coffee</span>
+          <span>Restaurants</span>
+          <span>Online shopping</span>
+          <span>Uber</span>
+          <span>Extras</span>
+          <span>Experiments</span>
+        </div>
+        <div class="story-actions">
+          <button class="primary-btn" data-action="startMethodSetup">${icon("check")} Set Up My Method</button>
+          <button class="secondary-btn" data-action="startTrackingLeaks">${icon("add")} Start Tracking Leaks</button>
+        </div>
       </div>
     </div>
   `
@@ -2139,7 +2127,7 @@ function renderMethodNumbersStep() {
       </div>
       <div class="method-note">Rent, groceries, gas, bills, household basics, and other expenses you accept as part of your real lifestyle.</div>
       <div class="sheet-actions">
-        <button class="secondary-btn" data-action="methodBack">Back</button>
+        <button class="secondary-btn" data-action="dismissMethod">Not Now</button>
         <button class="primary-btn" id="method-numbers-next" data-action="methodNext" ${canContinueMethodNumbers() ? "" : "disabled"}>${icon("check")} Continue</button>
       </div>
     </div>
@@ -2371,7 +2359,8 @@ function handleClick(event) {
   const target = event.target.closest("[data-action]")
   if (!target) {
     if (event.target === modalEl) {
-      if (app.modal === "method") dismissMethod()
+      if (app.modal === "methodIntro") dismissMethodIntro()
+      else if (app.modal === "method") dismissMethod()
       else closeModal()
     }
     return
@@ -2423,6 +2412,9 @@ function handleClick(event) {
   if (action === "exportCSV") exportCSV()
   if (action === "importJSON") importJSON()
   if (action === "openMethod") openMethod(target.dataset.step)
+  if (action === "startMethodSetup") startMethodSetup()
+  if (action === "startTrackingLeaks") startTrackingLeaks()
+  if (action === "dismissMethodIntro") dismissMethodIntro()
   if (action === "methodNext") methodNext()
   if (action === "methodBack") methodBack()
   if (action === "dismissMethod") dismissMethod()
@@ -2471,9 +2463,15 @@ function openModal(name) {
   renderModal()
 }
 
+function openMethodIntro(options = {}) {
+  app.modal = "methodIntro"
+  if (!options.silent) haptic("light")
+  renderModal()
+}
+
 function openMethod(step = 0, options = {}) {
   syncMethodDraft()
-  app.methodStep = Math.max(0, Math.min(3, Number(step) || 0))
+  app.methodStep = Math.max(0, Math.min(2, Number(step) || 0))
   app.modal = "method"
   if (!options.silent) haptic("light")
   renderModal()
@@ -2488,28 +2486,56 @@ function methodBack() {
 function methodNext() {
   const step = Number(app.methodStep) || 0
 
-  if (step === 1 && !canContinueMethodNumbers()) {
+  if (step === 0 && !canContinueMethodNumbers()) {
     toast("Add income and predictable expenses")
     return
   }
 
-  if (step === 1 && !Number(app.drafts.method.intentionalPool)) {
+  if (step === 0 && !Number(app.drafts.method.intentionalPool)) {
     app.drafts.method.intentionalPool = String(Math.max(0, roundMoney(Number(app.drafts.method.monthlyIncome) - Number(app.drafts.method.predictableExpensesTotal))))
   }
 
-  if (step === 2 && !canConfirmMethodPool()) {
+  if (step === 1 && !canConfirmMethodPool()) {
     toast("Choose your intentional pool")
     return
   }
 
-  if (step >= 3) {
+  if (step >= 2) {
     saveMethod()
     return
   }
 
-  app.methodStep = Math.min(3, step + 1)
+  app.methodStep = Math.min(2, step + 1)
   haptic("light")
   renderModal()
+}
+
+function markMethodIntroSeen() {
+  if (!Number(app.data._settings.method.introSeenAt)) {
+    app.data._settings.method.introSeenAt = Date.now()
+    saveData(app.data)
+  }
+}
+
+function startMethodSetup() {
+  markMethodIntroSeen()
+  openMethod(0)
+}
+
+function startTrackingLeaks() {
+  markMethodIntroSeen()
+  closeModal(false)
+  app.view = "cats"
+  render()
+  haptic("success")
+  toast("Create your first leak budget")
+}
+
+function dismissMethodIntro() {
+  markMethodIntroSeen()
+  closeModal(false)
+  render()
+  haptic("light")
 }
 
 function dismissMethod() {
@@ -2538,7 +2564,8 @@ function saveMethod() {
     predictableExpensesTotal,
     intentionalPool,
     completedAt: Date.now(),
-    dismissedAt: Number(app.data._settings.method.dismissedAt) || 0
+    dismissedAt: Number(app.data._settings.method.dismissedAt) || 0,
+    introSeenAt: Number(app.data._settings.method.introSeenAt) || Date.now()
   }
   syncMethodDraft()
   closeModal(false)
