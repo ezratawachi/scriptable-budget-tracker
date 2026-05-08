@@ -10,7 +10,8 @@ const toastEl = document.getElementById("toast")
 const bootEl = document.getElementById("boot")
 const bootStartedAt = performance.now()
 const queryParams = new URLSearchParams(window.location.search)
-const storyPreviewMode = queryParams.has("story-preview") || queryParams.has("preview-intro")
+const freshPreviewMode = queryParams.has("fresh-preview")
+const storyPreviewMode = freshPreviewMode || queryParams.has("story-preview") || queryParams.has("preview-intro")
 
 let supabaseClient = null
 let cloudSaveTimer = null
@@ -214,6 +215,8 @@ function ensureDataShape(data) {
 }
 
 function loadData() {
+  if (freshPreviewMode) return ensureDataShape({})
+
   try {
     const raw = localStorage.getItem(STORAGE_KEY)
     return ensureDataShape(raw ? JSON.parse(raw) : {})
@@ -227,8 +230,8 @@ function saveData(data, options = {}) {
   const sync = options.sync !== false
   const shaped = ensureDataShape(data)
   if (touch) shaped._settings._meta.lastSaved = Date.now()
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(shaped))
-  if (sync) scheduleCloudSave()
+  if (!freshPreviewMode) localStorage.setItem(STORAGE_KEY, JSON.stringify(shaped))
+  if (sync && !freshPreviewMode) scheduleCloudSave()
 }
 
 function getSavedAt(data) {
@@ -324,6 +327,12 @@ function startCloudSync(options = {}) {
 }
 
 async function initCloud() {
+  if (freshPreviewMode) {
+    app.cloudStatus = "Preview mode. Changes are not saved."
+    render()
+    return
+  }
+
   if (!window.supabase || typeof window.supabase.createClient !== "function") {
     app.cloudStatus = "Backup is unavailable. Data is saved on this device."
     render()
