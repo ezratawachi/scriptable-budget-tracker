@@ -4,20 +4,6 @@ const SUPABASE_URL = "https://yafcgilvulnbczaizcbf.supabase.co"
 const SUPABASE_PUBLISHABLE_KEY = "sb_publishable_xVtese4jTfZsAkB2cgSkOw_b8Wl5ksT"
 const CLOUD_SYNC_DELAY = 900
 
-const DEFAULT_BUDGETS = [
-  { id: "cafe", label: "Coffee", icon: "☕", budget: 50, color: "#F59E0B" },
-  { id: "rest", label: "Restaurants", icon: "🍽", budget: 200, color: "#EF4444" },
-  { id: "uber", label: "Uber", icon: "🚗", budget: 20, color: "#10B981" },
-  { id: "online", label: "Online Shopping", icon: "📦", budget: 100, color: "#2563EB" },
-  { id: "growth_lab", label: "Business Experiments", icon: "🧪", budget: 15, color: "#7C3AED" }
-]
-
-const DEFAULT_PRESETS = [
-  { id: "preset_starbucks", desc: "Starbucks", amt: 5.50, cat: "cafe", icon: "☕" },
-  { id: "preset_uber", desc: "Uber", amt: 6.00, cat: "uber", icon: "🚗" },
-  { id: "preset_lunch", desc: "Lunch", amt: 12.00, cat: "rest", icon: "🍽" }
-]
-
 const appEl = document.getElementById("app")
 const modalEl = document.getElementById("modal")
 const toastEl = document.getElementById("toast")
@@ -46,6 +32,8 @@ const app = {
   iconPickerTarget: null,
   iconPickerReturnModal: null,
   iconPickerQuery: "",
+  methodStep: 0,
+  methodAutoOpened: false,
   newPresetCat: null,
   newWishCat: null,
   installPrompt: null,
@@ -65,12 +53,14 @@ const app = {
     budgetEdit: { icon: "", label: "", budget: "" },
     edit: { desc: "", amt: "" },
     wishEdit: { icon: "", desc: "", amt: "" },
+    method: { monthlyIncome: "", predictableExpensesTotal: "", intentionalPool: "" },
     cloud: { email: "", password: "", code: "", codeSent: false, mode: "signin", resetSent: false, newPassword: "", confirmPassword: "" }
   }
 }
 
 markActiveMonth(app.data, app.key)
 saveData(app.data, { touch: false, sync: false })
+syncMethodDraft()
 
 function clone(value) {
   return JSON.parse(JSON.stringify(value))
@@ -145,7 +135,7 @@ function ensureDataShape(data) {
   const d = data && typeof data === "object" && !Array.isArray(data) ? data : {}
 
   if (!d._settings || typeof d._settings !== "object") d._settings = {}
-  if (!Array.isArray(d._settings.budgets) || !d._settings.budgets.length) d._settings.budgets = clone(DEFAULT_BUDGETS)
+  if (!Array.isArray(d._settings.budgets)) d._settings.budgets = []
 
   d._settings.budgets = d._settings.budgets
     .filter(b => b && b.id && b.label)
@@ -167,11 +157,6 @@ function ensureDataShape(data) {
   d._settings.deletedPresetIds = d._settings.deletedPresetIds.filter(Boolean).map(String)
 
   if (!Array.isArray(d._settings.presets)) d._settings.presets = []
-  DEFAULT_PRESETS.forEach(preset => {
-    const wasDeleted = d._settings.deletedPresetIds.includes(String(preset.id))
-    const exists = d._settings.presets.some(p => p && String(p.id) === String(preset.id))
-    if (!wasDeleted && !exists) d._settings.presets.push(clone(preset))
-  })
 
   d._settings.presets = d._settings.presets
     .filter(p => p && p.id && p.desc)
@@ -196,8 +181,17 @@ function ensureDataShape(data) {
     }))
     .filter(w => w.amt > 0)
 
+  const method = d._settings.method && typeof d._settings.method === "object" ? d._settings.method : {}
+  d._settings.method = {
+    monthlyIncome: Number(method.monthlyIncome) || 0,
+    predictableExpensesTotal: Number(method.predictableExpensesTotal) || 0,
+    intentionalPool: Number(method.intentionalPool) || 0,
+    completedAt: Number(method.completedAt) || 0,
+    dismissedAt: Number(method.dismissedAt) || 0
+  }
+
   if (!d._settings._meta || typeof d._settings._meta !== "object") d._settings._meta = {}
-  d._settings._meta.schemaVersion = 5
+  d._settings._meta.schemaVersion = 6
   d._settings._meta.lastSaved = Number(d._settings._meta.lastSaved) || 0
 
   Object.keys(d).forEach(key => {
@@ -1179,6 +1173,13 @@ function renderHome() {
     : ""
   const cloudTitle = app.cloudUser ? "Backup connected" : "Set up backup"
   const cloudButton = `<button class="top-btn icon-btn cloud-btn ${app.cloudUser ? "online" : ""} ${app.cloudBusy ? "syncing" : ""}" title="${cloudTitle}" aria-label="${cloudTitle}" data-action="go" data-view="account">${icon("cloud")}</button>`
+  const budgetContent = app.state.budgets.length
+    ? app.state.budgets.map(renderBudgetCard).join("")
+    : `<div class="empty budget-empty">
+        <div class="empty-title">No leak budgets yet</div>
+        <div class="row-meta">Create only the categories that feel invisible or uncontrolled.</div>
+        <button class="secondary-btn empty-action" data-action="go" data-view="cats">${icon("add")} Create Leak Budget</button>
+      </div>`
 
   return `
     <section class="view">
@@ -1213,14 +1214,48 @@ function renderHome() {
         <div class="bar-fill" style="width:${pct}%;background:${pct > 90 ? "var(--red)" : pct > 70 ? "var(--amb)" : "var(--acc)"}"></div>
       </div>
 
+      ${renderMethodCard()}
+
       <div class="scroll">
         <div class="category-list">
-          ${app.state.budgets.map(renderBudgetCard).join("")}
+          ${budgetContent}
         </div>
       </div>
 
       ${nav()}
     </section>
+  `
+}
+
+function renderMethodCard() {
+  const complete = hasCompletedMethod()
+  const summary = getMethodSummary()
+  const over = complete && summary.unassigned < 0
+  const title = complete ? "Intentional spending pool" : "Set your method"
+  const copy = complete
+    ? over
+      ? "Your leak budgets are above the pool. Treat it as a signal, not a failure."
+      : "Stable expenses are accepted. These are the leaks you chose to manage."
+    : "Don't fight stable life expenses. Control the invisible leaks."
+  const actionLabel = complete ? "Adjust" : "Start"
+  const actionStep = complete ? 2 : 0
+
+  return `
+    <button class="method-card ${complete ? "complete" : ""}" data-action="openMethod" data-step="${actionStep}">
+      <span class="method-card-head">
+        <span>
+          <span class="method-kicker">Method</span>
+          <span class="method-title">${esc(title)}</span>
+        </span>
+        <span class="method-action">${actionLabel}</span>
+      </span>
+      <span class="method-copy">${esc(copy)}</span>
+      <span class="method-stats">
+        <span><strong>${complete ? fmt(summary.pool) : "--"}</strong><em>Pool</em></span>
+        <span><strong>${fmt(summary.budgeted)}</strong><em>Budgeted</em></span>
+        <span class="${over ? "danger" : ""}"><strong>${complete ? fmt(Math.abs(summary.unassigned)) : "--"}</strong><em>${over ? "Over" : "Unassigned"}</em></span>
+      </span>
+    </button>
   `
 }
 
@@ -1539,6 +1574,73 @@ function getDataSummary() {
   }
 }
 
+function getTransactionCount(data = app.data) {
+  return getTrackedMonthKeys(data)
+    .reduce((sum, key) => sum + (Array.isArray(data[key]) ? data[key].length : 0), 0)
+}
+
+function getMethod() {
+  return app.data._settings.method
+}
+
+function hasCompletedMethod() {
+  return Number(getMethod().completedAt) > 0
+}
+
+function getMethodBudgetTotal() {
+  return app.data._settings.budgets
+    .reduce((sum, budget) => sum + (Number(budget.budget) || 0), 0)
+}
+
+function getMethodSummary() {
+  const method = getMethod()
+  const pool = Number(method.intentionalPool) || 0
+  const budgeted = getMethodBudgetTotal()
+  return {
+    pool,
+    budgeted,
+    unassigned: roundMoney(pool - budgeted),
+    suggested: Math.max(0, roundMoney((Number(method.monthlyIncome) || 0) - (Number(method.predictableExpensesTotal) || 0)))
+  }
+}
+
+function syncMethodDraft() {
+  const method = getMethod()
+  app.drafts.method = {
+    monthlyIncome: method.monthlyIncome ? String(method.monthlyIncome) : "",
+    predictableExpensesTotal: method.predictableExpensesTotal ? String(method.predictableExpensesTotal) : "",
+    intentionalPool: method.intentionalPool ? String(method.intentionalPool) : ""
+  }
+}
+
+function canContinueMethodNumbers() {
+  return app.drafts.method.monthlyIncome !== "" &&
+    app.drafts.method.predictableExpensesTotal !== "" &&
+    Number(app.drafts.method.monthlyIncome) > 0 &&
+    Number(app.drafts.method.predictableExpensesTotal) >= 0
+}
+
+function canConfirmMethodPool() {
+  return app.drafts.method.intentionalPool !== "" && Number(app.drafts.method.intentionalPool) > 0
+}
+
+function shouldAutoOpenMethod() {
+  const method = getMethod()
+  if (app.methodAutoOpened || hasCompletedMethod() || Number(method.dismissedAt) > 0) return false
+  if (getTransactionCount(app.data) > 0) return false
+  return getSavedAt(app.data) === 0
+}
+
+function maybeOpenInitialMethod() {
+  if (!shouldAutoOpenMethod()) return
+
+  window.setTimeout(() => {
+    if (!shouldAutoOpenMethod() || app.modal || app.view !== "home") return
+    app.methodAutoOpened = true
+    openMethod(0, { silent: true })
+  }, 1300)
+}
+
 function renderCloudPanel() {
   const summary = getDataSummary()
   const mode = app.drafts.cloud.mode || "signin"
@@ -1679,6 +1781,18 @@ function renderToolCard(view, iconName, title, copy) {
   `
 }
 
+function renderActionToolCard(action, iconName, title, copy, extras = "") {
+  return `
+    <button class="tool-card" data-action="${action}" ${extras}>
+      ${icon(iconName, "", "tool-icon")}
+      <span>
+        <span class="tool-title">${esc(title)}</span>
+        <span class="tool-copy">${esc(copy)}</span>
+      </span>
+    </button>
+  `
+}
+
 function renderAccount() {
   const summary = getDataSummary()
   const signedIn = !!app.cloudUser
@@ -1709,6 +1823,7 @@ function renderAccount() {
             ${icon("settings", "", "panel-icon")}
           </div>
           <div class="tool-grid">
+            ${renderActionToolCard("openMethod", "wallet", "Method", hasCompletedMethod() ? "Intentional spending pool" : "Find your spending leaks", `data-step="${hasCompletedMethod() ? 2 : 0}"`)}
             ${renderToolCard("cats", "grid", "Budgets", "Categories and monthly limits")}
             ${renderToolCard("presets", "settings", "Presets", "Reusable quick expenses")}
             ${renderToolCard("wishes", "heart", "Wishlist", "Planned purchases")}
@@ -1750,6 +1865,7 @@ function renderModal() {
   if (app.modal === "entryEdit") modalEl.innerHTML = renderEntryEditModal()
   if (app.modal === "wishEdit") modalEl.innerHTML = renderWishEditModal()
   if (app.modal === "data") modalEl.innerHTML = renderDataModal()
+  if (app.modal === "method") modalEl.innerHTML = renderMethodModal()
   if (app.modal === "iconPicker") modalEl.innerHTML = renderIconPickerModal()
 }
 
@@ -1761,7 +1877,7 @@ function renderCatPickerModal() {
         <button class="sheet-close" aria-label="Close" data-action="closeModal">${icon("close")}</button>
       </div>
       <div class="item-list">
-        ${app.state.budgets.map(cat => {
+        ${app.state.budgets.length ? app.state.budgets.map(cat => {
           const color = cssColor(cat.color)
           return `
             <button class="selected-cat" style="--cat:${color};border-color:${app.selectedCat === cat.id ? color : "var(--bord)"};background:${app.selectedCat === cat.id ? color + "10" : "var(--card)"}" data-action="chooseCat" data-id="${attr(cat.id)}">
@@ -1770,7 +1886,13 @@ function renderCatPickerModal() {
               <span class="cat-budget">${fmt(cat.budget)}</span>
             </button>
           `
-        }).join("")}
+        }).join("") : `
+          <div class="empty compact-empty">
+            <div class="empty-title">No leak budgets yet</div>
+            <div class="row-meta">Create your own categories first.</div>
+            <button class="secondary-btn empty-action" data-action="go" data-view="cats">${icon("add")} Create Budget</button>
+          </div>
+        `}
       </div>
     </div>
   `
@@ -1920,6 +2042,136 @@ function renderDataModal() {
   `
 }
 
+function renderMethodModal() {
+  const step = Math.max(0, Math.min(3, Number(app.methodStep) || 0))
+  const steps = [
+    renderMethodIntroStep,
+    renderMethodNumbersStep,
+    renderMethodPoolStep,
+    renderMethodReviewStep
+  ]
+
+  return `
+    <div class="sheet method-sheet" role="dialog" aria-modal="true" aria-label="Budget method">
+      <div class="sheet-top">
+        <div>
+          <div class="sheet-title">Budget Method</div>
+          <div class="method-step-label">Step ${step + 1} of 4</div>
+        </div>
+        <button class="sheet-close" aria-label="Close" data-action="dismissMethod">${icon("close")}</button>
+      </div>
+      <div class="method-progress" aria-hidden="true">
+        ${[0, 1, 2, 3].map(i => `<span class="${i <= step ? "active" : ""}"></span>`).join("")}
+      </div>
+      ${steps[step]()}
+    </div>
+  `
+}
+
+function renderMethodIntroStep() {
+  return `
+    <div class="method-body">
+      <div class="method-hero">
+        <div class="method-kicker">Control the invisible leaks</div>
+        <div class="method-heading">Do not fight the stable expenses.</div>
+        <p>Groceries, bills, gas, and household basics may simply be the cost of your real life. The leaks are different: small, repeating purchases that quietly become unlimited.</p>
+      </div>
+      <div class="method-principles">
+        <span>Accept predictable life expenses.</span>
+        <span>Choose the pool you want to spend intentionally.</span>
+        <span>Enjoy small luxuries without hidden stress.</span>
+      </div>
+      <div class="sheet-actions">
+        <button class="secondary-btn" data-action="dismissMethod">Maybe Later</button>
+        <button class="primary-btn" data-action="methodNext">${icon("check")} Start</button>
+      </div>
+    </div>
+  `
+}
+
+function renderMethodNumbersStep() {
+  return `
+    <div class="method-body">
+      <div class="method-heading">Start with the life you already accept.</div>
+      <p class="method-copy-block">Enter your monthly income and the predictable expenses you feel at peace with. This is not about judging them.</p>
+      <div class="field-group">
+        <div class="field-label">Monthly income</div>
+        <input class="field" id="method-income" type="number" inputmode="decimal" placeholder="$0.00" value="${attr(app.drafts.method.monthlyIncome)}">
+      </div>
+      <div class="field-group">
+        <div class="field-label">Predictable life expenses</div>
+        <input class="field" id="method-predictable" type="number" inputmode="decimal" placeholder="$0.00" value="${attr(app.drafts.method.predictableExpensesTotal)}">
+      </div>
+      <div class="method-note">Rent, groceries, gas, bills, household basics, and other expenses you accept as part of your real lifestyle.</div>
+      <div class="sheet-actions">
+        <button class="secondary-btn" data-action="methodBack">Back</button>
+        <button class="primary-btn" id="method-numbers-next" data-action="methodNext" ${canContinueMethodNumbers() ? "" : "disabled"}>${icon("check")} Continue</button>
+      </div>
+    </div>
+  `
+}
+
+function renderMethodPoolStep() {
+  const suggested = Math.max(0, roundMoney(Number(app.drafts.method.monthlyIncome) - Number(app.drafts.method.predictableExpensesTotal)))
+  const currentPool = Number(app.drafts.method.intentionalPool) || suggested
+
+  return `
+    <div class="method-body">
+      <div class="method-heading">Now choose your intentional pool.</div>
+      <p class="method-copy-block">The math suggests what remains, but you decide how much you want to manage inside this app.</p>
+      <div class="method-suggestion">
+        <span>Suggested from clarity</span>
+        <strong>${fmt(suggested)}</strong>
+      </div>
+      <div class="field-group">
+        <div class="field-label">Your intentional spending pool</div>
+        <input class="field" id="method-pool" type="number" inputmode="decimal" placeholder="$0.00" value="${attr(currentPool)}">
+      </div>
+      <div class="method-note">This is permission, not punishment. You can enjoy what fits inside it.</div>
+      <div class="sheet-actions">
+        <button class="secondary-btn" data-action="methodBack">Back</button>
+        <button class="primary-btn" id="method-pool-next" data-action="methodNext" ${currentPool > 0 ? "" : "disabled"}>${icon("check")} Review</button>
+      </div>
+    </div>
+  `
+}
+
+function renderMethodReviewStep() {
+  const pool = Number(app.drafts.method.intentionalPool) || 0
+  const budgeted = getMethodBudgetTotal()
+  const unassigned = roundMoney(pool - budgeted)
+  const over = unassigned < 0
+
+  return `
+    <div class="method-body">
+      <div class="method-heading">Your leak budgets start here.</div>
+      <p class="method-copy-block">These are the categories you are choosing to manage with awareness, not guilt.</p>
+      <div class="method-review-grid">
+        <div><span>Intentional pool</span><strong>${fmt(pool)}</strong></div>
+        <div><span>Budgeted leaks</span><strong>${fmt(budgeted)}</strong></div>
+        <div class="${over ? "danger" : ""}"><span>${over ? "Over pool" : "Unassigned"}</span><strong>${fmt(Math.abs(unassigned))}</strong></div>
+      </div>
+      <div class="method-budget-list">
+        ${app.data._settings.budgets.length ? app.data._settings.budgets.map(budget => `
+          <div class="method-budget-row">
+            <span>${esc(budget.icon)} ${esc(budget.label)}</span>
+            <strong>${fmt(budget.budget)}</strong>
+          </div>
+        `).join("") : `
+          <div class="method-empty-budget">
+            No leak budgets yet. Finish the method, then create only the categories that actually feel like leaks.
+          </div>
+        `}
+      </div>
+      <div class="method-note">${over ? "This is a signal, not a failure. Adjust the pool or budgets when it feels right." : "You can leave the rest unassigned or add more leak budgets later."}</div>
+      <div class="sheet-actions">
+        <button class="secondary-btn" data-action="methodBack">Back</button>
+        <button class="primary-btn" data-action="saveMethod">${icon("check")} Finish</button>
+      </div>
+    </div>
+  `
+}
+
 function renderIconPickerModal() {
   return `
     <div class="sheet icon-sheet" role="dialog" aria-modal="true" aria-label="Choose icon">
@@ -2048,6 +2300,16 @@ function handleInput(event) {
   if (target.id === "wish-edit-desc") app.drafts.wishEdit.desc = target.value
   if (target.id === "wish-edit-amt") app.drafts.wishEdit.amt = target.value
 
+  if (target.id === "method-income") app.drafts.method.monthlyIncome = target.value
+  if (target.id === "method-predictable") app.drafts.method.predictableExpensesTotal = target.value
+  if (["method-income", "method-predictable"].includes(target.id)) {
+    updateButtonState("method-numbers-next", canContinueMethodNumbers())
+  }
+  if (target.id === "method-pool") {
+    app.drafts.method.intentionalPool = target.value
+    updateButtonState("method-pool-next", canConfirmMethodPool())
+  }
+
   if (target.id === "cloud-email") {
     app.drafts.cloud.email = target.value
     updateButtonState("send-reset-link", isValidEmail(app.drafts.cloud.email))
@@ -2073,7 +2335,10 @@ function handleInput(event) {
 function handleClick(event) {
   const target = event.target.closest("[data-action]")
   if (!target) {
-    if (event.target === modalEl) closeModal()
+    if (event.target === modalEl) {
+      if (app.modal === "method") dismissMethod()
+      else closeModal()
+    }
     return
   }
 
@@ -2122,6 +2387,11 @@ function handleClick(event) {
   if (action === "exportJSON") exportJSON()
   if (action === "exportCSV") exportCSV()
   if (action === "importJSON") importJSON()
+  if (action === "openMethod") openMethod(target.dataset.step)
+  if (action === "methodNext") methodNext()
+  if (action === "methodBack") methodBack()
+  if (action === "dismissMethod") dismissMethod()
+  if (action === "saveMethod") saveMethod()
   if (action === "setAuthMode") setAuthMode(mode)
   if (action === "cloudPasswordLogin") signInWithPassword()
   if (action === "cloudCreateAccount") createPasswordAccount()
@@ -2164,6 +2434,83 @@ function openModal(name) {
   haptic("light")
   app.modal = name
   renderModal()
+}
+
+function openMethod(step = 0, options = {}) {
+  syncMethodDraft()
+  app.methodStep = Math.max(0, Math.min(3, Number(step) || 0))
+  app.modal = "method"
+  if (!options.silent) haptic("light")
+  renderModal()
+}
+
+function methodBack() {
+  app.methodStep = Math.max(0, (Number(app.methodStep) || 0) - 1)
+  haptic("light")
+  renderModal()
+}
+
+function methodNext() {
+  const step = Number(app.methodStep) || 0
+
+  if (step === 1 && !canContinueMethodNumbers()) {
+    toast("Add income and predictable expenses")
+    return
+  }
+
+  if (step === 1 && !Number(app.drafts.method.intentionalPool)) {
+    app.drafts.method.intentionalPool = String(Math.max(0, roundMoney(Number(app.drafts.method.monthlyIncome) - Number(app.drafts.method.predictableExpensesTotal))))
+  }
+
+  if (step === 2 && !canConfirmMethodPool()) {
+    toast("Choose your intentional pool")
+    return
+  }
+
+  if (step >= 3) {
+    saveMethod()
+    return
+  }
+
+  app.methodStep = Math.min(3, step + 1)
+  haptic("light")
+  renderModal()
+}
+
+function dismissMethod() {
+  const wasIncomplete = !hasCompletedMethod()
+  if (wasIncomplete) {
+    app.data._settings.method.dismissedAt = Date.now()
+    saveData(app.data)
+  }
+  closeModal(false)
+  render()
+  if (wasIncomplete) toast("You can open Method anytime")
+}
+
+function saveMethod() {
+  const monthlyIncome = Number(app.drafts.method.monthlyIncome)
+  const predictableExpensesTotal = Number(app.drafts.method.predictableExpensesTotal)
+  const intentionalPool = Number(app.drafts.method.intentionalPool)
+
+  if (monthlyIncome <= 0 || predictableExpensesTotal < 0 || intentionalPool <= 0) {
+    toast("Check the method numbers")
+    return
+  }
+
+  app.data._settings.method = {
+    monthlyIncome,
+    predictableExpensesTotal,
+    intentionalPool,
+    completedAt: Date.now(),
+    dismissedAt: Number(app.data._settings.method.dismissedAt) || 0
+  }
+  syncMethodDraft()
+  closeModal(false)
+  saveData(app.data)
+  render()
+  haptic("success")
+  toast("Method saved")
 }
 
 function closeModal(shouldRender = true) {
@@ -2804,5 +3151,6 @@ if ("serviceWorker" in navigator) {
 }
 
 render()
+maybeOpenInitialMethod()
 requestAnimationFrame(hideBootSplash)
 initCloud()
