@@ -1859,12 +1859,14 @@ function renderAccount() {
 function renderModal() {
   if (!app.modal) {
     modalEl.classList.remove("show")
+    modalEl.classList.remove("story-mode")
     modalEl.setAttribute("aria-hidden", "true")
     modalEl.innerHTML = ""
     return
   }
 
   modalEl.classList.add("show")
+  modalEl.classList.toggle("story-mode", app.modal === "methodIntro")
   modalEl.setAttribute("aria-hidden", "false")
 
   if (app.modal === "catPicker") modalEl.innerHTML = renderCatPickerModal()
@@ -2078,34 +2080,33 @@ function renderMethodModal() {
 
 function renderMethodIntroModal() {
   return `
-    <div class="sheet method-story-sheet" role="dialog" aria-modal="true" aria-label="Welcome to Budget Tracker">
-      <div class="sheet-top">
-        <div>
-          <div class="method-kicker">Budget Tracker</div>
-          <div class="sheet-title">The budget that finally clicked</div>
+    <div class="story-screen" role="dialog" aria-modal="true" aria-label="Welcome to Budget Tracker">
+      <div class="story-shell">
+        <div class="story-top">
+          <div class="story-brand">Budget Tracker</div>
+          <button class="story-skip" data-action="dismissMethodIntro">Not now</button>
         </div>
-        <button class="sheet-close" aria-label="Close" data-action="dismissMethodIntro">${icon("close")}</button>
-      </div>
-      <div class="method-body">
-        <div class="method-hero story-hero">
-          <div class="method-heading">We tried tracking everything. It made budgeting feel heavier, not smarter.</div>
-          <p>Then we noticed something simple: groceries, bills, gas, and household basics were not the real problem. They were stable parts of real life.</p>
+
+        <div class="story-content">
+          <div class="story-eyebrow">A note before you start</div>
+          <h1>We built this because budgeting felt broken.</h1>
+
+          <p class="story-lede">The normal way of budgeting did not work for us.</p>
+
+          <p>At first, we tried tracking everything: groceries, bills, gas, household basics, all of it. But it made money feel heavier than it needed to be.</p>
+
+          <p>Eventually we noticed something honest: those stable life expenses were not really the problem. They were part of the life we had already accepted.</p>
+
+          <p>The real leaks were different. They were the things we actually enjoyed, but had stopped noticing: coffee, restaurants, online shopping, Uber rides, random extras, little experiments.</p>
+
+          <blockquote>This app is not here to track your whole life. It is here to help you choose your leaks, set simple limits, and enjoy spending without quiet stress.</blockquote>
+
+          <p class="story-example">Your leaks may be different from ours. That is the point.</p>
         </div>
-        <div class="story-line">
-          The real problem was spending we actually enjoyed, but had stopped noticing. Small purchases felt harmless one by one, then quietly became unlimited.
-        </div>
-        <div class="story-quote">Do not fight stable life expenses. Control the invisible leaks.</div>
-        <div class="story-examples" aria-label="Leak examples">
-          <span>Coffee</span>
-          <span>Restaurants</span>
-          <span>Online shopping</span>
-          <span>Uber</span>
-          <span>Extras</span>
-          <span>Experiments</span>
-        </div>
+
         <div class="story-actions">
-          <button class="primary-btn" data-action="startMethodSetup">${icon("check")} Set Up My Method</button>
-          <button class="secondary-btn" data-action="startTrackingLeaks">${icon("add")} Start Tracking Leaks</button>
+          <button class="primary-btn" data-action="startTrackingLeaks">${icon("add")} Start Tracking Leaks</button>
+          <button class="text-btn story-method-link" data-action="startMethodSetup">Set Up My Method</button>
         </div>
       </div>
     </div>
