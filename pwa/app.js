@@ -9,6 +9,8 @@ const modalEl = document.getElementById("modal")
 const toastEl = document.getElementById("toast")
 const bootEl = document.getElementById("boot")
 const bootStartedAt = performance.now()
+const queryParams = new URLSearchParams(window.location.search)
+const storyPreviewMode = queryParams.has("story-preview") || queryParams.has("preview-intro")
 
 let supabaseClient = null
 let cloudSaveTimer = null
@@ -1640,10 +1642,10 @@ function shouldAutoOpenMethod() {
 }
 
 function maybeOpenInitialMethod() {
-  if (!shouldAutoOpenMethod()) return
+  if (!storyPreviewMode && !shouldAutoOpenMethod()) return
 
   window.setTimeout(() => {
-    if (!shouldAutoOpenMethod() || app.modal || app.view !== "home") return
+    if ((!storyPreviewMode && !shouldAutoOpenMethod()) || app.modal || app.view !== "home") return
     app.methodAutoOpened = true
     openMethodIntro({ silent: true })
   }, 1300)
@@ -2512,6 +2514,8 @@ function methodNext() {
 }
 
 function markMethodIntroSeen() {
+  if (storyPreviewMode) return
+
   if (!Number(app.data._settings.method.introSeenAt)) {
     app.data._settings.method.introSeenAt = Date.now()
     saveData(app.data)
