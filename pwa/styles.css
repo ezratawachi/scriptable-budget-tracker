@@ -1140,17 +1140,34 @@ button:disabled{
 }
 
 .icon-sheet{
-  max-height:78vh;
+  height:min(82vh,680px);
+  max-height:calc(100vh - 24px);
+  height:min(82dvh,680px);
+  max-height:calc(100dvh - 24px - env(safe-area-inset-bottom));
+  display:flex;
+  flex-direction:column;
+  overflow:hidden;
 }
 
 .icon-search{
+  flex:0 0 auto;
   margin-bottom:14px;
+}
+
+.icon-results{
+  flex:1 1 auto;
+  min-height:0;
+  overflow-y:auto;
+  overscroll-behavior:contain;
+  -webkit-overflow-scrolling:touch;
+  padding-right:2px;
 }
 
 .icon-groups{
   display:flex;
   flex-direction:column;
   gap:14px;
+  padding-bottom:2px;
 }
 
 .icon-group .section-label{

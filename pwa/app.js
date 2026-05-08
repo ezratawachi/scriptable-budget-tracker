@@ -1921,10 +1921,6 @@ function renderDataModal() {
 }
 
 function renderIconPickerModal() {
-  const target = app.iconPickerTarget
-  const selected = iconPickerValue(target)
-  const groups = filteredIconGroups()
-
   return `
     <div class="sheet icon-sheet" role="dialog" aria-modal="true" aria-label="Choose icon">
       <div class="sheet-top">
@@ -1932,25 +1928,42 @@ function renderIconPickerModal() {
         <button class="sheet-close" aria-label="Close" data-action="closeModal">${icon("close")}</button>
       </div>
       <input class="field icon-search" id="icon-search" type="search" placeholder="Search coffee, rent, travel..." value="${attr(app.iconPickerQuery)}">
-      <div class="icon-groups">
-        ${groups.length ? groups.map(([label, values]) => `
-          <div class="icon-group">
-            <div class="section-label">${esc(label)}</div>
-            <div class="icon-grid">
-              ${values.map(choice => {
-                const value = iconChoiceValue(choice)
-                const labelText = iconChoiceLabel(choice)
-                return `
-                <button class="icon-choice ${selected === value ? "active" : ""}" title="${attr(labelText)}" aria-label="${attr(labelText)}" data-action="chooseIcon" data-value="${attr(value)}">
-                  ${esc(value)}
-                </button>
-              `}).join("")}
-            </div>
-          </div>
-        `).join("") : `<div class="empty icon-empty"><div class="empty-title">No matches</div><div class="row-meta">Try another word.</div></div>`}
+      <div class="icon-results" id="icon-picker-results">
+        ${renderIconPickerResults()}
       </div>
     </div>
   `
+}
+
+function renderIconPickerResults() {
+  const target = app.iconPickerTarget
+  const selected = iconPickerValue(target)
+  const groups = filteredIconGroups()
+
+  return `
+    <div class="icon-groups">
+      ${groups.length ? groups.map(([label, values]) => `
+        <div class="icon-group">
+          <div class="section-label">${esc(label)}</div>
+          <div class="icon-grid">
+            ${values.map(choice => {
+              const value = iconChoiceValue(choice)
+              const labelText = iconChoiceLabel(choice)
+              return `
+              <button class="icon-choice ${selected === value ? "active" : ""}" title="${attr(labelText)}" aria-label="${attr(labelText)}" data-action="chooseIcon" data-value="${attr(value)}">
+                ${esc(value)}
+              </button>
+            `}).join("")}
+          </div>
+        </div>
+      `).join("") : `<div class="empty icon-empty"><div class="empty-title">No matches</div><div class="row-meta">Try another word.</div></div>`}
+    </div>
+  `
+}
+
+function updateIconPickerResults() {
+  const results = document.getElementById("icon-picker-results")
+  if (results) results.innerHTML = renderIconPickerResults()
 }
 
 function render() {
@@ -2053,13 +2066,7 @@ function handleInput(event) {
 
   if (target.id === "icon-search") {
     app.iconPickerQuery = target.value
-    renderModal()
-    requestAnimationFrame(() => {
-      const search = document.getElementById("icon-search")
-      if (!search) return
-      search.focus()
-      search.setSelectionRange(search.value.length, search.value.length)
-    })
+    updateIconPickerResults()
   }
 }
 
