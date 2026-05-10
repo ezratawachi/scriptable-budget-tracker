@@ -2125,17 +2125,21 @@ function renderMethodIntroModal() {
 
         <div class="story-content">
           <div class="story-eyebrow">A note from Ezra</div>
-          <h1>We built this because budgeting felt broken.</h1>
+          <h1>The number that made budgeting click.</h1>
 
-          <p class="story-lede">Hey, I'm Ezra. Budget Tracker started because the normal way of budgeting did not work for us as a couple.</p>
+          <p class="story-lede">Hey, I'm Ezra. This app started because the normal way of budgeting did not work for us as a couple.</p>
 
           <p>At first, we tried tracking everything: groceries, bills, gas, household basics, all of it. Instead of making us feel clearer, it made money feel heavier.</p>
 
-          <p>Then we noticed something honest: those stable life expenses were not really the problem. They were part of the life we had already accepted.</p>
+          <p>The part that finally clicked was this: before you can create leak budgets, you need to know what your stable life already costs.</p>
 
-          <p>The real leaks were different. They were the things we actually enjoyed, but had stopped noticing: coffee, restaurants, online shopping, Uber rides, random extras, little experiments.</p>
+          <p>Once we accepted the expenses we felt at peace with, we subtracted that number from our income. What was left became the money we wanted to manage on purpose.</p>
 
-          <blockquote>This app is not here to track your whole life. It helps you choose your leaks, set simple limits, and enjoy spending without quiet stress.</blockquote>
+          <p>That is where the real budgeting starts: coffee, restaurants, online shopping, Uber rides, random extras, little experiments. The things we enjoyed, but did not want to become invisible.</p>
+
+          <p>After that, daily budgeting got lighter. We did not need to keep staring at our whole life. We just needed to track the leak budgets we had chosen.</p>
+
+          <blockquote>This app is not here to track your whole life. It helps you find what is stable, choose your leaks, set simple limits, and enjoy spending without quiet stress.</blockquote>
 
           <p class="story-example">Your leaks may be different from ours. That is the point.</p>
         </div>
@@ -2197,7 +2201,7 @@ function renderMethodNumbersStep() {
   return `
     <div class="method-body">
       <div class="method-heading">Start with the life you already accept.</div>
-      <p class="method-copy-block">Enter your monthly income and the predictable expenses you feel at peace with. This is not about judging them.</p>
+      <p class="method-copy-block">Enter your monthly income and the predictable expenses you feel at peace with. Income minus this number becomes your intentional pool.</p>
       <div class="field-group">
         <div class="field-label">Monthly income</div>
         <input class="field" id="method-income" type="number" inputmode="decimal" placeholder="$0.00" value="${attr(app.drafts.method.monthlyIncome)}">
@@ -2206,7 +2210,7 @@ function renderMethodNumbersStep() {
         <div class="field-label">Predictable life expenses</div>
         <input class="field" id="method-predictable" type="number" inputmode="decimal" placeholder="$0.00" value="${attr(app.drafts.method.predictableExpensesTotal)}">
       </div>
-      <div class="method-note">Rent, groceries, gas, bills, household basics, and other expenses you accept as part of your real lifestyle.</div>
+      <div class="method-note">Rent, groceries, gas, bills, household basics, and other expenses you accept as part of your real lifestyle. The goal is clarity, not judgment.</div>
       <div class="sheet-actions">
         <button class="secondary-btn" data-action="dismissMethod">Not Now</button>
         <button class="primary-btn" id="method-numbers-next" data-action="methodNext" ${canContinueMethodNumbers() ? "" : "disabled"}>${icon("check")} Continue</button>
@@ -2222,7 +2226,7 @@ function renderMethodPoolStep() {
   return `
     <div class="method-body">
       <div class="method-heading">Now choose your intentional pool.</div>
-      <p class="method-copy-block">The math suggests what remains, but you decide how much you want to manage inside this app.</p>
+      <p class="method-copy-block">This is the amount you can split into leak budgets. Once those budgets exist, the daily job is simple: track only those leaks.</p>
       <div class="method-suggestion">
         <span>Suggested from clarity</span>
         <strong>${fmt(suggested)}</strong>
