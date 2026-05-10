@@ -187,7 +187,7 @@ Deno.serve(async req => {
     if (uploads.length > 6) return jsonResponse({ error: "Upload up to 6 files at a time." }, 400)
 
     const files = await Promise.all(uploads.map(readFileAsText))
-    const model = Deno.env.get("ANTHROPIC_MODEL") || "claude-3-5-haiku-20241022"
+    const model = Deno.env.get("ANTHROPIC_MODEL") || "claude-haiku-4-5-20251001"
 
     const inputSchema = {
       type: "object",
