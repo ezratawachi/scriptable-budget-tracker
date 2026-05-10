@@ -1,5 +1,8 @@
 const STORAGE_KEY = "budget_tracker_pwa_v1"
+const APP_VERSION = "22"
 const ROLLOVER_START_KEY = "2026-4"
+const REVIEW_REQUIRED_MONTHS = 4
+const REVIEW_HANDOFF_URL = `https://ezratawachi.github.io/scriptable-budget-tracker/pwa/?v=${APP_VERSION}&review=1`
 const SUPABASE_URL = "https://yafcgilvulnbczaizcbf.supabase.co"
 const SUPABASE_PUBLISHABLE_KEY = "sb_publishable_xVtese4jTfZsAkB2cgSkOw_b8Wl5ksT"
 const AI_FUNCTION_URL = SUPABASE_URL.replace(".supabase.co", ".functions.supabase.co") + "/analyze-statements"
@@ -13,6 +16,7 @@ const bootStartedAt = performance.now()
 const queryParams = new URLSearchParams(window.location.search)
 const freshPreviewMode = queryParams.has("fresh-preview")
 const storyPreviewMode = freshPreviewMode || queryParams.has("story-preview") || queryParams.has("preview-intro")
+const reviewDeepLinkMode = queryParams.has("review")
 
 let supabaseClient = null
 let cloudSaveTimer = null
@@ -22,7 +26,7 @@ const app = {
   data: loadData(),
   key: monthKey(),
   state: null,
-  view: "home",
+  view: reviewDeepLinkMode ? "review" : "home",
   modal: null,
   selectedCat: null,
   returnView: null,
@@ -1662,7 +1666,8 @@ function renderWishCard(wish) {
 function renderReview() {
   const context = reviewContext()
   const hasTransactions = context.review.transactions.length > 0
-  const stable = reviewStableAmount(context)
+  const averageContext = reviewAverageContext()
+  const stable = reviewStableAmount(averageContext)
   const visibleTotal = reviewTotal(context.rows, context.divisor)
   const income = Number(app.drafts.method.monthlyIncome) || Number(getMethod().monthlyIncome) || 0
   const available = roundMoney(income - stable)
@@ -1679,14 +1684,15 @@ function renderReview() {
         <div class="review-hero">
           <div class="section-label">Find your pool</div>
           <div class="review-title">Discover what you do not need to track.</div>
-          <p>Upload a few months of statements. AI cleans and categorizes them, then you decide what feels stable and what feels like a leak.</p>
+          <p>Upload 4 months of statements. One month can lie. Four months starts to show your real rhythm.</p>
           <div class="review-actions">
             <button class="primary-btn" data-action="pickStatements" ${app.reviewBusy ? "disabled" : ""}>${icon("upload")} Upload Statements</button>
             ${hasTransactions ? `<button class="secondary-btn" data-action="clearReview">${icon("trash")} Clear Review</button>` : ""}
           </div>
-          <div class="review-status">${esc(app.reviewStatus || (hasTransactions ? "Raw files are not stored after processing." : "CSV, TXT, and Excel first. Upload 3-4 months if you can."))}</div>
+          <div class="review-status">${esc(app.reviewStatus || (hasTransactions ? "Raw files are not stored after processing." : "CSV, TXT, and Excel first. We need 4 detected months before saving your pool."))}</div>
         </div>
 
+        ${renderDesktopHandoffCard()}
         ${hasTransactions ? renderReviewWorkspace(context, { stable, visibleTotal, income, available }) : renderReviewEmpty()}
       </div>
     </section>
@@ -1702,34 +1708,76 @@ function renderReviewEmpty() {
   `
 }
 
+function renderDesktopHandoffCard() {
+  const signedIn = !!app.cloudUser
+  const promoted = isPhoneLikeDevice()
+  const qrUrl = `https://api.qrserver.com/v1/create-qr-code/?size=144x144&margin=8&data=${encodeURIComponent(REVIEW_HANDOFF_URL)}`
+
+  if (!promoted) {
+    return `
+      <div class="review-handoff compact">
+        <div>
+          <div class="section-label">Continue elsewhere</div>
+          <div class="review-handoff-title">Open this review on a computer</div>
+        </div>
+        <button class="secondary-btn" data-action="copyReviewLink">${icon("file")} Copy Link</button>
+      </div>
+    `
+  }
+
+  return `
+    <div class="review-handoff">
+      <div class="review-handoff-copy">
+        <div class="section-label">Continue on computer</div>
+        <div class="review-handoff-title">Uploading statements is often easier on a computer.</div>
+        <p>Open this same account there and continue your review.</p>
+        <p class="${signedIn ? "review-handoff-ok" : "review-handoff-warn"}">${signedIn ? "Use this same signed-in account on your computer." : "Sign in first so your review can continue between devices."}</p>
+      </div>
+      <img class="review-qr" src="${attr(qrUrl)}" alt="QR code to open Budget Tracker on a computer">
+      <div class="review-link-row">
+        <input class="field review-link-field" readonly value="${attr(REVIEW_HANDOFF_URL)}" aria-label="Review link">
+        <button class="secondary-btn" data-action="copyReviewLink">${icon("file")} Copy</button>
+      </div>
+      ${signedIn ? "" : `<button class="text-btn review-signin-link" data-action="go" data-view="account">Sign in for cross-device backup</button>`}
+    </div>
+  `
+}
+
 function renderReviewWorkspace(context, totals) {
   const groups = buildReviewGroups(context)
   const months = context.months
-  const canSavePool = totals.income > 0 && totals.stable > 0
+  const missingMonths = reviewMissingMonths()
+  const canSavePool = canSaveReviewPool(totals.income, totals.stable)
+  const poolCopy = reviewPoolCopy(totals.income, totals.stable)
+  const saveLabel = missingMonths > 0 ? `Need ${missingMonths} more ${missingMonths === 1 ? "month" : "months"}` : "Save Pool"
+  const poolNote = context.active === "average"
+    ? "Saving uses the all-month average."
+    : "You are inspecting one month. Saving still uses the all-month average."
 
   return `
     <div class="review-stats">
-      <div><span>Files</span><strong>${context.review.files.length}</strong></div>
-      <div><span>Months</span><strong>${months.length}</strong></div>
+      <div><span>4 months needed</span><strong>${missingMonths > 0 ? `${missingMonths} missing` : "Ready"}</strong></div>
+      <div><span>Months detected</span><strong>${months.length}</strong></div>
       <div><span>Visible spend</span><strong>${fmt(totals.visibleTotal)}</strong></div>
-      <div><span>Stable selected</span><strong>${fmt(totals.stable)}</strong></div>
+      <div><span>Stable monthly average</span><strong>${fmt(totals.stable)}</strong></div>
     </div>
 
     <div class="review-pool-card">
       <div>
-        <div class="section-label">Tracking pool</div>
+        <div class="section-label">Available for leak budgets</div>
         <div class="review-pool-title" id="review-pool-amount">${totals.income > 0 ? fmt(Math.max(0, totals.available)) : "Add income"}</div>
-        <p id="review-pool-copy">${totals.income > 0 ? "Available to split manually into leak budgets." : "Add monthly income to see what remains after stable expenses."}</p>
+        <p id="review-pool-copy">${poolCopy}</p>
+        <p class="review-pool-note" id="review-pool-note">${esc(poolNote)}</p>
       </div>
       <div class="field-group review-income">
         <div class="field-label">Monthly income</div>
         <input class="field" id="review-income" type="number" inputmode="decimal" placeholder="$0.00" value="${attr(app.drafts.method.monthlyIncome || (getMethod().monthlyIncome ? String(getMethod().monthlyIncome) : ""))}">
       </div>
-      <button class="primary-btn" id="save-review-pool" data-action="saveReviewPool" ${canSavePool ? "" : "disabled"}>${icon("check")} Save Pool</button>
+      <button class="primary-btn" id="save-review-pool" data-action="saveReviewPool" ${canSavePool ? "" : "disabled"}>${icon("check")} ${esc(saveLabel)}</button>
     </div>
 
     <div class="review-periods">
-      ${renderReviewPeriodButton("average", "Monthly average", reviewTotal(context.review.transactions, Math.max(1, months.length)), context.active === "average")}
+      ${renderReviewPeriodButton("average", "All months average", reviewTotal(context.review.transactions, Math.max(1, months.length)), context.active === "average")}
       ${months.map(month => renderReviewPeriodButton(`month:${month}`, monthLabelFromISO(month), reviewTotal(context.review.transactions.filter(tx => tx.monthKey === month), 1), context.active === `month:${month}`)).join("")}
     </div>
 
@@ -1794,7 +1842,7 @@ function renderReviewGroup(group, total, index, context) {
         </span>
       </button>
       <div class="mini-bar"><span style="width:${Math.min(100, percent)}%;background:${color}"></span></div>
-      <button class="review-detail" data-action="toggleReviewCategoryDetails" data-id="${attr(group.category)}">${expanded ? "Hide details" : "View details"}</button>
+      <button class="review-detail" aria-expanded="${expanded ? "true" : "false"}" data-action="toggleReviewCategoryDetails" data-id="${attr(group.category)}">${expanded ? "Hide details" : "View details"}</button>
       <div class="review-store-list">
         ${group.stores.map(store => renderReviewStore(store, context)).join("")}
       </div>
@@ -1818,7 +1866,7 @@ function renderReviewStore(store, context) {
         </span>
         <span>${fmt(store.amount)}</span>
       </button>
-      ${store.rows.length > 1 ? `<button class="review-detail mini" data-action="toggleReviewStoreDetails" data-id="${attr(key)}">${expanded ? "Hide" : "Rows"}</button>` : ""}
+      ${store.rows.length > 1 ? `<button class="review-detail mini" aria-expanded="${expanded ? "true" : "false"}" data-action="toggleReviewStoreDetails" data-id="${attr(key)}">${expanded ? "Hide" : "Rows"}</button>` : ""}
       <div class="review-transaction-list">
         ${store.rows.map(tx => renderReviewTransaction(tx, context)).join("")}
       </div>
@@ -1890,6 +1938,10 @@ function isStandaloneApp() {
   return window.matchMedia?.("(display-mode: standalone)")?.matches || window.navigator.standalone === true
 }
 
+function isPhoneLikeDevice() {
+  return /iPhone|iPod|Android.*Mobile/i.test(navigator.userAgent || "") || window.innerWidth < 700
+}
+
 function shouldShowInstallCoach() {
   if (isStandaloneApp()) return false
   if (freshPreviewMode) return true
@@ -1942,6 +1994,23 @@ function reviewContext() {
   const divisor = month ? 1 : Math.max(1, months.length)
 
   return { review, months, active, month, rows, divisor }
+}
+
+function reviewAverageContext() {
+  const review = getReview()
+  const months = reviewMonths()
+  return {
+    review,
+    months,
+    active: "average",
+    month: "",
+    rows: review.transactions,
+    divisor: Math.max(1, months.length)
+  }
+}
+
+function reviewMissingMonths() {
+  return Math.max(0, REVIEW_REQUIRED_MONTHS - reviewMonths().length)
 }
 
 function reviewAmount(value, divisor) {
@@ -2038,15 +2107,29 @@ function reviewStableAmount(context = reviewContext()) {
   return reviewTotal(reviewStableRows(context), context.divisor)
 }
 
-function reviewAvailablePool(context = reviewContext()) {
+function reviewAvailablePool(context = reviewAverageContext()) {
   return roundMoney((Number(app.drafts.method.monthlyIncome) || Number(getMethod().monthlyIncome) || 0) - reviewStableAmount(context))
 }
 
 function saveReviewState() {
   const review = getReview()
   review.updatedAt = Date.now()
-  review.stableMonthlyAmount = reviewStableAmount()
+  review.stableMonthlyAmount = reviewStableAmount(reviewAverageContext())
   saveData(app.data)
+}
+
+function canSaveReviewPool(income, stable) {
+  return Number(income) > 0 && Number(stable) > 0 && reviewMissingMonths() === 0
+}
+
+function reviewPoolCopy(income, stable) {
+  const missing = reviewMissingMonths()
+  if (missing > 0) {
+    return `Upload ${missing} more ${missing === 1 ? "month" : "months"} before saving. We need 4 months to see the real pattern.`
+  }
+  if (Number(income) <= 0) return "Add monthly income to see what remains after stable expenses."
+  if (Number(stable) <= 0) return "Select the stable expenses you are comfortable not tracking."
+  return "Available to split manually into leak budgets."
 }
 
 function syncMethodDraft() {
@@ -2925,14 +3008,15 @@ function handleClick(event) {
   if (action === "saveMethod") saveMethod()
   if (action === "pickStatements") pickStatementFiles()
   if (action === "clearReview") clearReview()
-  if (action === "setReviewPeriod") setReviewPeriod(value)
-  if (action === "toggleReviewCategory") toggleReviewCategory(id)
-  if (action === "toggleReviewCategoryDetails") toggleReviewCategoryDetails(id)
-  if (action === "toggleReviewStore") toggleReviewStore(id)
-  if (action === "toggleReviewStoreDetails") toggleReviewStoreDetails(id)
-  if (action === "toggleReviewTransaction") toggleReviewTransaction(id)
-  if (action === "clearReviewSelection") clearReviewSelection()
+  if (action === "setReviewPeriod") setReviewPeriod(value, target)
+  if (action === "toggleReviewCategory") toggleReviewCategory(id, target)
+  if (action === "toggleReviewCategoryDetails") toggleReviewCategoryDetails(id, target)
+  if (action === "toggleReviewStore") toggleReviewStore(id, target)
+  if (action === "toggleReviewStoreDetails") toggleReviewStoreDetails(id, target)
+  if (action === "toggleReviewTransaction") toggleReviewTransaction(id, target)
+  if (action === "clearReviewSelection") clearReviewSelection(target)
   if (action === "saveReviewPool") saveReviewPool()
+  if (action === "copyReviewLink") copyReviewLink()
   if (action === "setAuthMode") setAuthMode(mode)
   if (action === "cloudPasswordLogin") signInWithPassword()
   if (action === "cloudCreateAccount") createPasswordAccount()
@@ -3154,18 +3238,20 @@ function saveMethod() {
 }
 
 function updateReviewPoolPreview() {
-  const context = reviewContext()
-  const stable = reviewStableAmount(context)
+  const stable = reviewStableAmount(reviewAverageContext())
   const income = Number(app.drafts.method.monthlyIncome) || 0
   const available = Math.max(0, roundMoney(income - stable))
   const title = document.getElementById("review-pool-amount")
   const copy = document.getElementById("review-pool-copy")
+  const button = document.getElementById("save-review-pool")
 
   if (title) title.textContent = income > 0 ? fmt(available) : "Add income"
-  if (copy) copy.textContent = income > 0
-    ? "Available to split manually into leak budgets."
-    : "Add monthly income to see what remains after stable expenses."
-  updateButtonState("save-review-pool", income > 0 && stable > 0)
+  if (copy) copy.textContent = reviewPoolCopy(income, stable)
+  updateButtonState("save-review-pool", canSaveReviewPool(income, stable))
+  if (button) {
+    const missing = reviewMissingMonths()
+    button.innerHTML = `${icon("check")} ${missing > 0 ? `Need ${missing} more ${missing === 1 ? "month" : "months"}` : "Save Pool"}`
+  }
 }
 
 function pickStatementFiles() {
@@ -3180,6 +3266,61 @@ function pickStatementFiles() {
     analyzeStatementFiles(files)
   }, { once: true })
   input.click()
+}
+
+async function copyReviewLink() {
+  try {
+    await navigator.clipboard.writeText(REVIEW_HANDOFF_URL)
+    haptic("success")
+    toast("Review link copied")
+  } catch (error) {
+    const field = document.querySelector(".review-link-field")
+    if (field instanceof HTMLInputElement) {
+      field.focus()
+      field.select()
+    }
+    toast("Select and copy the link")
+  }
+}
+
+function reviewAnchorSelector(anchor) {
+  if (!anchor || !(anchor instanceof HTMLElement)) return ""
+  const action = anchor.dataset.action
+  const id = anchor.dataset.id
+  const value = anchor.dataset.value
+  if (!action) return ""
+  if (id) return `[data-action="${CSS.escape(action)}"][data-id="${CSS.escape(id)}"]`
+  if (value) return `[data-action="${CSS.escape(action)}"][data-value="${CSS.escape(value)}"]`
+  return `[data-action="${CSS.escape(action)}"]`
+}
+
+function renderReviewPreservingPosition(anchor) {
+  if (app.view !== "review") {
+    render()
+    return
+  }
+
+  const scroll = document.querySelector(".review-scroll")
+  const scrollTop = scroll ? scroll.scrollTop : 0
+  const selector = reviewAnchorSelector(anchor)
+  const beforeTop = anchor instanceof HTMLElement ? anchor.getBoundingClientRect().top : null
+
+  render()
+
+  requestAnimationFrame(() => {
+    const nextScroll = document.querySelector(".review-scroll")
+    if (!nextScroll) return
+
+    if (selector && beforeTop !== null) {
+      const nextAnchor = document.querySelector(selector)
+      if (nextAnchor instanceof HTMLElement) {
+        nextScroll.scrollTop += nextAnchor.getBoundingClientRect().top - beforeTop
+        return
+      }
+    }
+
+    nextScroll.scrollTop = scrollTop
+  })
 }
 
 function reviewErrorMessage(error) {
@@ -3329,16 +3470,16 @@ function cleanupReviewSelections() {
   review.excludedTransactions = review.excludedTransactions.filter(value => validTx.has(value))
 }
 
-function setReviewPeriod(value) {
+function setReviewPeriod(value, anchor) {
   const review = getReview()
   const valid = value === "average" || (String(value || "").startsWith("month:") && reviewMonths().includes(String(value).replace("month:", "")))
   review.activePeriod = valid ? String(value) : "average"
   saveReviewState()
-  render()
+  renderReviewPreservingPosition(anchor)
   haptic("light")
 }
 
-function toggleReviewCategory(category) {
+function toggleReviewCategory(category, anchor) {
   if (!category) return
   const set = reviewSelectedSet("selectedCategories")
   toggleSetValue(set, category)
@@ -3346,21 +3487,21 @@ function toggleReviewCategory(category) {
   removeReviewStoreOverrides(category)
   cleanupReviewSelections()
   saveReviewState()
-  render()
+  renderReviewPreservingPosition(anchor)
   haptic("light")
 }
 
-function toggleReviewCategoryDetails(category) {
+function toggleReviewCategoryDetails(category, anchor) {
   if (!category) return
   const set = reviewSelectedSet("expandedCategories")
   toggleSetValue(set, category)
   setReviewArray("expandedCategories", set)
   saveReviewState()
-  render()
+  renderReviewPreservingPosition(anchor)
   haptic("light")
 }
 
-function toggleReviewStore(key) {
+function toggleReviewStore(key, anchor) {
   if (!key) return
   const { category } = parseReviewStoreKey(key)
   const review = getReview()
@@ -3376,21 +3517,21 @@ function toggleReviewStore(key) {
   removeReviewTransactionOverridesForStore(key)
   cleanupReviewSelections()
   saveReviewState()
-  render()
+  renderReviewPreservingPosition(anchor)
   haptic("light")
 }
 
-function toggleReviewStoreDetails(key) {
+function toggleReviewStoreDetails(key, anchor) {
   if (!key) return
   const set = reviewSelectedSet("expandedStores")
   toggleSetValue(set, key)
   setReviewArray("expandedStores", set)
   saveReviewState()
-  render()
+  renderReviewPreservingPosition(anchor)
   haptic("light")
 }
 
-function toggleReviewTransaction(id) {
+function toggleReviewTransaction(id, anchor) {
   const tx = reviewTransactionById(id)
   if (!tx) return
 
@@ -3414,11 +3555,11 @@ function toggleReviewTransaction(id) {
   setReviewArray("excludedTransactions", excludedTx)
   cleanupReviewSelections()
   saveReviewState()
-  render()
+  renderReviewPreservingPosition(anchor)
   haptic("light")
 }
 
-function clearReviewSelection() {
+function clearReviewSelection(anchor) {
   const review = getReview()
   review.selectedCategories = []
   review.selectedStores = []
@@ -3426,7 +3567,7 @@ function clearReviewSelection() {
   review.excludedStores = []
   review.excludedTransactions = []
   saveReviewState()
-  render()
+  renderReviewPreservingPosition(anchor)
   haptic("medium")
   toast("Selection cleared")
 }
@@ -3442,9 +3583,14 @@ function clearReview() {
 }
 
 function saveReviewPool() {
-  const context = reviewContext()
+  const context = reviewAverageContext()
   const stable = reviewStableAmount(context)
   const income = Number(app.drafts.method.monthlyIncome) || 0
+
+  if (reviewMissingMonths() > 0) {
+    toast(`Upload ${reviewMissingMonths()} more ${reviewMissingMonths() === 1 ? "month" : "months"}`)
+    return
+  }
 
   if (income <= 0 || stable <= 0) {
     toast("Add income and select stable expenses")

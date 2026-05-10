@@ -1765,6 +1765,81 @@ button:disabled{
   margin-top:9px;
 }
 
+.review-handoff{
+  border:.5px solid rgba(37,99,235,.14);
+  border-radius:var(--r);
+  background:linear-gradient(180deg,#FFFFFF 0%,#F7FAFF 100%);
+  box-shadow:var(--shadow-xs);
+  padding:12px;
+  display:grid;
+  grid-template-columns:minmax(0,1fr) 104px;
+  gap:10px;
+  align-items:center;
+}
+
+.review-handoff.compact{
+  grid-template-columns:minmax(0,1fr) auto;
+}
+
+.review-handoff-title{
+  margin-top:4px;
+  color:var(--txt);
+  font-size:15px;
+  font-weight:900;
+  line-height:1.15;
+}
+
+.review-handoff p{
+  margin-top:6px;
+  color:var(--mut);
+  font-size:12px;
+  font-weight:750;
+  line-height:1.35;
+}
+
+.review-handoff-ok{
+  color:var(--acc)!important;
+}
+
+.review-handoff-warn{
+  color:var(--amb)!important;
+}
+
+.review-qr{
+  width:104px;
+  height:104px;
+  border:.5px solid var(--bord2);
+  border-radius:var(--r);
+  background:#FFFFFF;
+  padding:6px;
+  box-shadow:var(--shadow-xs);
+}
+
+.review-link-row{
+  grid-column:1 / -1;
+  display:grid;
+  grid-template-columns:minmax(0,1fr) auto;
+  gap:8px;
+}
+
+.review-link-row .secondary-btn{
+  min-width:84px;
+}
+
+.review-link-field{
+  min-height:42px;
+  font-size:11px;
+  font-weight:750;
+}
+
+.review-signin-link{
+  grid-column:1 / -1;
+  min-height:34px;
+  color:var(--acc);
+  font-size:12px;
+  font-weight:900;
+}
+
 .review-stats{
   display:grid;
   grid-template-columns:repeat(2,minmax(0,1fr));
@@ -1828,6 +1903,12 @@ button:disabled{
   font-size:12px;
   font-weight:750;
   line-height:1.35;
+}
+
+.review-pool-note{
+  color:var(--acc)!important;
+  font-size:11px!important;
+  font-weight:850!important;
 }
 
 .review-income{
@@ -2015,16 +2096,27 @@ button:disabled{
 
 .review-store-list,
 .review-transaction-list{
-  display:none;
+  display:grid;
+  max-height:0;
+  opacity:0;
+  overflow:hidden;
+  pointer-events:none;
+  transition:max-height .22s ease,opacity .18s ease,padding .22s ease;
 }
 
 .review-group.expanded > .review-store-list,
 .review-store.expanded > .review-transaction-list{
-  display:grid;
+  max-height:1600px;
+  opacity:1;
+  pointer-events:auto;
 }
 
 .review-store-list{
   gap:7px;
+  padding:0 10px;
+}
+
+.review-group.expanded > .review-store-list{
   padding:0 10px 10px;
 }
 
@@ -2055,6 +2147,10 @@ button:disabled{
 
 .review-transaction-list{
   gap:6px;
+  padding:0 8px;
+}
+
+.review-store.expanded > .review-transaction-list{
   padding:0 8px 8px;
 }
 
@@ -2113,6 +2209,23 @@ button:disabled{
 
 .review-empty{
   min-height:160px;
+}
+
+@media (min-width:760px){
+  .review-handoff:not(.compact){
+    display:none;
+  }
+}
+
+@media (max-width:380px){
+  .review-handoff{
+    grid-template-columns:minmax(0,1fr) 92px;
+  }
+
+  .review-qr{
+    width:92px;
+    height:92px;
+  }
 }
 
 .sheet-actions{
