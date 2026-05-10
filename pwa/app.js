@@ -35,8 +35,10 @@ const app = {
   iconPickerTarget: null,
   iconPickerReturnModal: null,
   iconPickerQuery: "",
+  methodIntroMode: "firstRun",
   methodStep: 0,
   methodAutoOpened: false,
+  installCoachNext: null,
   newPresetCat: null,
   newWishCat: null,
   installPrompt: null,
@@ -191,11 +193,12 @@ function ensureDataShape(data) {
     intentionalPool: Number(method.intentionalPool) || 0,
     completedAt: Number(method.completedAt) || 0,
     dismissedAt: Number(method.dismissedAt) || 0,
-    introSeenAt: Number(method.introSeenAt) || 0
+    introSeenAt: Number(method.introSeenAt) || 0,
+    installCoachSeenAt: Number(method.installCoachSeenAt) || 0
   }
 
   if (!d._settings._meta || typeof d._settings._meta !== "object") d._settings._meta = {}
-  d._settings._meta.schemaVersion = 7
+  d._settings._meta.schemaVersion = 8
   d._settings._meta.lastSaved = Number(d._settings._meta.lastSaved) || 0
 
   Object.keys(d).forEach(key => {
@@ -250,7 +253,8 @@ function dataStats(data) {
     Number(method.intentionalPool) ||
     Number(method.completedAt) ||
     Number(method.dismissedAt) ||
-    Number(method.introSeenAt)
+    Number(method.introSeenAt) ||
+    Number(method.installCoachSeenAt)
   )
 
   return {
@@ -1606,6 +1610,21 @@ function hasSeenMethodIntro() {
   return hasCompletedMethod() || Number(method.introSeenAt) > 0 || Number(method.dismissedAt) > 0
 }
 
+function hasSeenInstallCoach() {
+  return Number(getMethod().installCoachSeenAt) > 0
+}
+
+function isStandaloneApp() {
+  return window.matchMedia?.("(display-mode: standalone)")?.matches || window.navigator.standalone === true
+}
+
+function shouldShowInstallCoach() {
+  if (isStandaloneApp()) return false
+  if (freshPreviewMode) return true
+  if (storyPreviewMode) return false
+  return !hasSeenInstallCoach()
+}
+
 function getMethodBudgetTotal() {
   return app.data._settings.budgets
     .reduce((sum, budget) => sum + (Number(budget.budget) || 0), 0)
@@ -1656,7 +1675,7 @@ function maybeOpenInitialMethod() {
   window.setTimeout(() => {
     if ((!storyPreviewMode && !shouldAutoOpenMethod()) || app.modal || app.view !== "home") return
     app.methodAutoOpened = true
-    openMethodIntro({ silent: true })
+    openMethodIntro({ silent: true, mode: storyPreviewMode && !freshPreviewMode ? "read" : "firstRun" })
   }, 1300)
 }
 
@@ -1815,9 +1834,10 @@ function renderActionToolCard(action, iconName, title, copy, extras = "") {
 function renderAccount() {
   const summary = getDataSummary()
   const signedIn = !!app.cloudUser
-  const installPanel = app.installPrompt
-    ? `<button class="primary-btn" data-action="install">${icon("download")} Install App</button>`
-    : `<div class="data-note install-note">On iPhone, open Share in Safari and choose Add to Home Screen.</div>`
+  const installed = isStandaloneApp()
+  const installCopy = installed
+    ? "You are already using Budget Tracker from your Home Screen."
+    : "Save Budget Tracker to your Home Screen so it feels like a real app."
 
   return `
     <section class="view">
@@ -1842,6 +1862,7 @@ function renderAccount() {
             ${icon("settings", "", "panel-icon")}
           </div>
           <div class="tool-grid">
+            ${renderActionToolCard("openStory", "file", "Read Ezra's note", "Why this app exists")}
             ${renderActionToolCard("openMethod", "wallet", "Method", hasCompletedMethod() ? "Edit intentional pool" : "Optional setup", `data-step="${hasCompletedMethod() ? 1 : 0}"`)}
             ${renderToolCard("cats", "grid", "Budgets", "Categories and monthly limits")}
             ${renderToolCard("presets", "settings", "Presets", "Reusable quick expenses")}
@@ -1854,12 +1875,13 @@ function renderAccount() {
         <div class="account-panel">
           <div class="panel-head">
             <div>
-              <div class="section-label">PWA</div>
-              <div class="panel-title">Installed app</div>
+              <div class="section-label">App</div>
+              <div class="panel-title">Install on this phone</div>
             </div>
             ${icon("download", "", "panel-icon")}
           </div>
-          ${installPanel}
+          <div class="data-note install-note">${installCopy}</div>
+          <button class="${installed ? "secondary-btn" : "primary-btn"}" data-action="openInstallCoach">${icon(installed ? "check" : "download")} ${installed ? "View Install Status" : "Show Me How"}</button>
         </div>
       </div>
       ${nav()}
@@ -1877,7 +1899,7 @@ function renderModal() {
   }
 
   modalEl.classList.add("show")
-  modalEl.classList.toggle("story-mode", app.modal === "methodIntro")
+  modalEl.classList.toggle("story-mode", app.modal === "methodIntro" || app.modal === "installCoach")
   modalEl.setAttribute("aria-hidden", "false")
 
   if (app.modal === "catPicker") modalEl.innerHTML = renderCatPickerModal()
@@ -1887,6 +1909,7 @@ function renderModal() {
   if (app.modal === "wishEdit") modalEl.innerHTML = renderWishEditModal()
   if (app.modal === "data") modalEl.innerHTML = renderDataModal()
   if (app.modal === "methodIntro") modalEl.innerHTML = renderMethodIntroModal()
+  if (app.modal === "installCoach") modalEl.innerHTML = renderInstallCoachModal()
   if (app.modal === "method") modalEl.innerHTML = renderMethodModal()
   if (app.modal === "iconPicker") modalEl.innerHTML = renderIconPickerModal()
 }
@@ -2090,34 +2113,80 @@ function renderMethodModal() {
 }
 
 function renderMethodIntroModal() {
+  const readOnly = app.methodIntroMode === "read"
+
   return `
-    <div class="story-screen" role="dialog" aria-modal="true" aria-label="Welcome to Budget Tracker">
+    <div class="story-screen" role="dialog" aria-modal="true" aria-label="A note from Ezra">
       <div class="story-shell">
         <div class="story-top">
           <div class="story-brand">Budget Tracker</div>
-          <button class="story-skip" data-action="dismissMethodIntro">Not now</button>
+          <button class="story-skip" data-action="dismissMethodIntro">${readOnly ? "Close" : "Not now"}</button>
         </div>
 
         <div class="story-content">
-          <div class="story-eyebrow">A note before you start</div>
+          <div class="story-eyebrow">A note from Ezra</div>
           <h1>We built this because budgeting felt broken.</h1>
 
-          <p class="story-lede">The normal way of budgeting did not work for us.</p>
+          <p class="story-lede">Hey, I'm Ezra. Budget Tracker started because the normal way of budgeting did not work for us as a couple.</p>
 
-          <p>At first, we tried tracking everything: groceries, bills, gas, household basics, all of it. But it made money feel heavier than it needed to be.</p>
+          <p>At first, we tried tracking everything: groceries, bills, gas, household basics, all of it. Instead of making us feel clearer, it made money feel heavier.</p>
 
-          <p>Eventually we noticed something honest: those stable life expenses were not really the problem. They were part of the life we had already accepted.</p>
+          <p>Then we noticed something honest: those stable life expenses were not really the problem. They were part of the life we had already accepted.</p>
 
           <p>The real leaks were different. They were the things we actually enjoyed, but had stopped noticing: coffee, restaurants, online shopping, Uber rides, random extras, little experiments.</p>
 
-          <blockquote>This app is not here to track your whole life. It is here to help you choose your leaks, set simple limits, and enjoy spending without quiet stress.</blockquote>
+          <blockquote>This app is not here to track your whole life. It helps you choose your leaks, set simple limits, and enjoy spending without quiet stress.</blockquote>
 
           <p class="story-example">Your leaks may be different from ours. That is the point.</p>
         </div>
 
         <div class="story-actions">
-          <button class="primary-btn" data-action="startTrackingLeaks">${icon("add")} Start Tracking Leaks</button>
-          <button class="text-btn story-method-link" data-action="startMethodSetup">Set Up My Method</button>
+          ${readOnly
+            ? `<button class="primary-btn" data-action="dismissMethodIntro">${icon("check")} Close</button>`
+            : `
+              <button class="primary-btn" data-action="startTrackingLeaks">${icon("add")} Start Tracking Leaks</button>
+              <button class="text-btn story-method-link" data-action="startMethodSetup">Set Up My Method</button>
+            `}
+        </div>
+      </div>
+    </div>
+  `
+}
+
+function renderInstallCoachModal() {
+  const installed = isStandaloneApp()
+  const canPrompt = !!app.installPrompt && !installed
+  const primaryAction = installed ? "continueInstallCoach" : canPrompt ? "installThenContinue" : "continueInstallCoach"
+  const primaryLabel = installed ? "Done" : canPrompt ? "Install App" : "Got it"
+
+  return `
+    <div class="story-screen install-screen" role="dialog" aria-modal="true" aria-label="Install Budget Tracker">
+      <div class="story-shell install-shell">
+        <div class="story-top">
+          <div class="story-brand">Budget Tracker</div>
+          <button class="story-skip" data-action="continueInstallCoach">${installed ? "Close" : "Continue in Safari"}</button>
+        </div>
+
+        <div class="story-content install-content">
+          <div class="story-eyebrow">${installed ? "You're all set" : "One small thing"}</div>
+          <h1>${installed ? "It is already saved like an app." : "Save it like a real app."}</h1>
+          <p class="story-lede">${installed ? "Budget Tracker is running from your Home Screen." : "Budget Tracker works best from your Home Screen, like any other app."}</p>
+
+          ${installed ? `
+            <p>Open it from the icon whenever you want to add a leak expense quickly.</p>
+          ` : `
+            <p>Most people do not know websites can become apps on iPhone. This one is meant to live next to your everyday apps, so tracking stays quick.</p>
+            <div class="install-steps" aria-label="iPhone install steps">
+              <div><span>1</span><strong>Tap Share</strong><em>Use the Safari share button at the bottom.</em></div>
+              <div><span>2</span><strong>Choose Add to Home Screen</strong><em>iPhone will create the Budget Tracker app icon.</em></div>
+              <div><span>3</span><strong>Open Budget Tracker</strong><em>Next time, start from your Home Screen.</em></div>
+            </div>
+          `}
+        </div>
+
+        <div class="story-actions">
+          <button class="primary-btn" data-action="${primaryAction}">${icon(installed ? "check" : "download")} ${primaryLabel}</button>
+          ${installed ? "" : `<button class="text-btn story-method-link" data-action="continueInstallCoach">Continue in Safari</button>`}
         </div>
       </div>
     </div>
@@ -2372,6 +2441,7 @@ function handleClick(event) {
   if (!target) {
     if (event.target === modalEl) {
       if (app.modal === "methodIntro") dismissMethodIntro()
+      else if (app.modal === "installCoach") continueInstallCoach()
       else if (app.modal === "method") dismissMethod()
       else closeModal()
     }
@@ -2423,10 +2493,14 @@ function handleClick(event) {
   if (action === "exportJSON") exportJSON()
   if (action === "exportCSV") exportCSV()
   if (action === "importJSON") importJSON()
+  if (action === "openStory") openMethodIntro({ mode: "read" })
   if (action === "openMethod") openMethod(target.dataset.step)
+  if (action === "openInstallCoach") openInstallCoach()
   if (action === "startMethodSetup") startMethodSetup()
   if (action === "startTrackingLeaks") startTrackingLeaks()
   if (action === "dismissMethodIntro") dismissMethodIntro()
+  if (action === "continueInstallCoach") continueInstallCoach()
+  if (action === "installThenContinue") installThenContinue()
   if (action === "methodNext") methodNext()
   if (action === "methodBack") methodBack()
   if (action === "dismissMethod") dismissMethod()
@@ -2476,7 +2550,15 @@ function openModal(name) {
 }
 
 function openMethodIntro(options = {}) {
+  app.methodIntroMode = options.mode || (options.readOnly ? "read" : "firstRun")
   app.modal = "methodIntro"
+  if (!options.silent) haptic("light")
+  renderModal()
+}
+
+function openInstallCoach(options = {}) {
+  app.installCoachNext = options.next || null
+  app.modal = "installCoach"
   if (!options.silent) haptic("light")
   renderModal()
 }
@@ -2531,25 +2613,78 @@ function markMethodIntroSeen() {
   }
 }
 
+function markInstallCoachSeen() {
+  if (storyPreviewMode) return
+
+  if (!Number(app.data._settings.method.installCoachSeenAt)) {
+    app.data._settings.method.installCoachSeenAt = Date.now()
+    saveData(app.data)
+  }
+}
+
+function maybeShowInstallCoach(next) {
+  if (shouldShowInstallCoach()) {
+    openInstallCoach({ next, silent: true })
+    return
+  }
+
+  continueAfterInstallCoach(next)
+}
+
+function continueAfterInstallCoach(next) {
+  app.installCoachNext = null
+  closeModal(false)
+
+  if (next === "method") {
+    openMethod(0)
+    return
+  }
+
+  if (next === "cats") {
+    app.view = "cats"
+    render()
+    haptic("success")
+    toast("Create your first leak budget")
+    return
+  }
+
+  render()
+}
+
 function startMethodSetup() {
   markMethodIntroSeen()
-  openMethod(0)
+  maybeShowInstallCoach("method")
 }
 
 function startTrackingLeaks() {
   markMethodIntroSeen()
-  closeModal(false)
-  app.view = "cats"
-  render()
-  haptic("success")
-  toast("Create your first leak budget")
+  maybeShowInstallCoach("cats")
 }
 
 function dismissMethodIntro() {
+  if (app.methodIntroMode === "read") {
+    app.methodIntroMode = "firstRun"
+    closeModal(false)
+    render()
+    haptic("light")
+    return
+  }
+
   markMethodIntroSeen()
   closeModal(false)
   render()
   haptic("light")
+}
+
+function continueInstallCoach() {
+  const next = app.installCoachNext
+  markInstallCoachSeen()
+  continueAfterInstallCoach(next)
+}
+
+async function installThenContinue() {
+  await installPWA({ renderAfter: false })
+  continueInstallCoach()
 }
 
 function dismissMethod() {
@@ -2579,7 +2714,8 @@ function saveMethod() {
     intentionalPool,
     completedAt: Date.now(),
     dismissedAt: Number(app.data._settings.method.dismissedAt) || 0,
-    introSeenAt: Number(app.data._settings.method.introSeenAt) || Date.now()
+    introSeenAt: Number(app.data._settings.method.introSeenAt) || Date.now(),
+    installCoachSeenAt: Number(app.data._settings.method.installCoachSeenAt) || 0
   }
   syncMethodDraft()
   closeModal(false)
@@ -2590,6 +2726,8 @@ function saveMethod() {
 }
 
 function closeModal(shouldRender = true) {
+  const previousModal = app.modal
+
   if (app.modal === "iconPicker" && app.iconPickerReturnModal) {
     app.modal = app.iconPickerReturnModal
     app.iconPickerReturnModal = null
@@ -2600,6 +2738,8 @@ function closeModal(shouldRender = true) {
   }
 
   app.modal = null
+  if (previousModal === "methodIntro") app.methodIntroMode = "firstRun"
+  if (previousModal === "installCoach") app.installCoachNext = null
   app.editingBudgetId = null
   app.editingPresetId = null
   app.editingPresetCat = null
@@ -3173,13 +3313,13 @@ function importJSON() {
   input.click()
 }
 
-async function installPWA() {
+async function installPWA(options = {}) {
   if (!app.installPrompt) return
   haptic("medium")
   app.installPrompt.prompt()
   await app.installPrompt.userChoice.catch(() => null)
   app.installPrompt = null
-  render()
+  if (options.renderAfter !== false) render()
 }
 
 function toast(message) {
