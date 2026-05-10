@@ -985,6 +985,43 @@ input:focus-visible{
   font-weight:850;
 }
 
+.cloud-sheet{
+  padding:6px 16px 18px;
+}
+
+.cloud-sheet .cloud-panel,
+.cloud-sheet .backup-panel{
+  border:none;
+  background:transparent;
+  box-shadow:none;
+  padding:0;
+  margin:0;
+}
+
+.cloud-sheet .cloud-head{
+  padding:4px 2px 12px;
+}
+
+.cloud-sheet .cloud-kicker{
+  display:none;
+}
+
+.cloud-sheet .cloud-title{
+  font-size:17px;
+  font-weight:800;
+  letter-spacing:-.012em;
+}
+
+.version-stamp{
+  margin-top:18px;
+  padding:8px 0 32px;
+  color:var(--soft);
+  text-align:center;
+  font-size:11.5px;
+  font-weight:700;
+  letter-spacing:.02em;
+}
+
 .nav{
   display:grid;
   grid-template-columns:repeat(3,minmax(0,1fr));
@@ -3102,8 +3139,171 @@ button:disabled{
 .account-scroll{
   display:flex;
   flex-direction:column;
-  gap:14px;
+  gap:22px;
   padding-bottom:14px;
+}
+
+.settings-section{
+  display:flex;
+  flex-direction:column;
+  gap:8px;
+}
+
+.settings-section-label{
+  display:block;
+  padding:0 16px;
+  color:var(--soft);
+  font-size:11px;
+  font-weight:800;
+  letter-spacing:.1em;
+  text-transform:uppercase;
+}
+
+.settings-card{
+  border:.5px solid var(--bord);
+  border-radius:var(--r-lg);
+  background:var(--card);
+  overflow:hidden;
+  box-shadow:var(--shadow-xs);
+}
+
+.settings-row{
+  width:100%;
+  display:grid;
+  grid-template-columns:32px minmax(0,1fr) auto;
+  align-items:center;
+  gap:14px;
+  padding:14px 16px;
+  border:none;
+  background:transparent;
+  color:var(--txt);
+  text-align:left;
+  position:relative;
+  transition:background var(--dur-fast) var(--ease-out);
+}
+
+.settings-row + .settings-row::before{
+  content:"";
+  position:absolute;
+  left:62px;
+  right:0;
+  top:0;
+  height:.5px;
+  background:var(--bord2);
+}
+
+.settings-row:hover{
+  background:var(--card2);
+}
+
+.settings-row:active{
+  background:var(--bord2);
+}
+
+.settings-row-icon{
+  width:30px;
+  height:30px;
+  border-radius:8px;
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  font-size:16px;
+  background:var(--card2);
+  color:var(--acc);
+  flex-shrink:0;
+}
+
+.settings-row-icon .ui-icon{
+  width:18px;
+  height:18px;
+}
+
+.settings-row-icon.tint-blue{ background:rgba(37,99,235,.12); color:var(--blue); }
+.settings-row-icon.tint-amber{ background:var(--amb2); color:var(--amb); }
+.settings-row-icon.tint-grn{ background:var(--grn2); color:var(--grn); }
+.settings-row-icon.tint-red{ background:var(--red2); color:var(--red); }
+.settings-row-icon.tint-acc{ background:var(--acc2); color:var(--acc); }
+.settings-row-icon.tint-mut{ background:var(--dim); color:var(--mut); }
+
+.settings-row-main{
+  min-width:0;
+  display:flex;
+  flex-direction:column;
+  gap:2px;
+}
+
+.settings-row-title{
+  font-size:15.5px;
+  font-weight:700;
+  letter-spacing:-.012em;
+  color:var(--txt);
+  overflow:hidden;
+  text-overflow:ellipsis;
+  white-space:nowrap;
+}
+
+.settings-row-copy{
+  font-size:12.5px;
+  font-weight:550;
+  letter-spacing:-.005em;
+  color:var(--mut);
+  overflow:hidden;
+  text-overflow:ellipsis;
+  white-space:nowrap;
+}
+
+.settings-row-side{
+  display:flex;
+  align-items:center;
+  gap:8px;
+  color:var(--soft);
+  font-size:13px;
+  font-weight:600;
+  font-variant-numeric:tabular-nums;
+  flex-shrink:0;
+}
+
+.settings-row-chevron{
+  color:var(--soft);
+  width:8px;
+  height:12px;
+  flex-shrink:0;
+}
+
+.settings-row-chevron svg{
+  width:100%;
+  height:100%;
+  fill:none;
+  stroke:currentColor;
+  stroke-width:2.2;
+  stroke-linecap:round;
+  stroke-linejoin:round;
+}
+
+.settings-block{
+  padding:16px;
+  display:flex;
+  flex-direction:column;
+  gap:12px;
+}
+
+.settings-block-title{
+  font-size:15.5px;
+  font-weight:700;
+  letter-spacing:-.012em;
+  color:var(--txt);
+}
+
+[data-theme="dark"] .settings-row-icon{
+  background:var(--card2);
+}
+
+[data-theme="dark"] .settings-row:hover{
+  background:rgba(255,255,255,.03);
+}
+
+[data-theme="dark"] .settings-row:active{
+  background:rgba(255,255,255,.05);
 }
 
 .account-scroll .cloud-panel{

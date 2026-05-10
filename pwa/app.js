@@ -1,5 +1,5 @@
 const STORAGE_KEY = "budget_tracker_pwa_v1"
-const APP_VERSION = "25"
+const APP_VERSION = "26"
 const ROLLOVER_START_KEY = "2026-4"
 const REVIEW_REQUIRED_MONTHS = 4
 const REVIEW_HANDOFF_URL = `https://ezratawachi.github.io/scriptable-budget-tracker/pwa/?v=${APP_VERSION}&review=1`
@@ -1127,7 +1127,12 @@ const ICON_PATHS = {
   settings: '<path d="M12 15.5a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7Z"/><path d="M19.4 15a1.8 1.8 0 0 0 .36 2l.05.05a2.1 2.1 0 0 1-3 3l-.05-.05a1.8 1.8 0 0 0-2-.36 1.8 1.8 0 0 0-1.1 1.65V21a2.1 2.1 0 0 1-4.2 0v-.07a1.8 1.8 0 0 0-1.1-1.65 1.8 1.8 0 0 0-2 .36l-.05.05a2.1 2.1 0 0 1-3-3l.05-.05a1.8 1.8 0 0 0 .36-2 1.8 1.8 0 0 0-1.65-1.1H2a2.1 2.1 0 0 1 0-4.2h.07a1.8 1.8 0 0 0 1.65-1.1 1.8 1.8 0 0 0-.36-2l-.05-.05a2.1 2.1 0 0 1 3-3l.05.05a1.8 1.8 0 0 0 2 .36 1.8 1.8 0 0 0 1.1-1.65V2a2.1 2.1 0 0 1 4.2 0v.07a1.8 1.8 0 0 0 1.1 1.65 1.8 1.8 0 0 0 2-.36l.05-.05a2.1 2.1 0 0 1 3 3l-.05.05a1.8 1.8 0 0 0-.36 2 1.8 1.8 0 0 0 1.65 1.1H22a2.1 2.1 0 0 1 0 4.2h-.07a1.8 1.8 0 0 0-1.65 1.1Z"/>',
   check: '<path d="m20 6-11 11-5-5"/>',
   wallet: '<path d="M4 7a3 3 0 0 1 3-3h11v16H6a2 2 0 0 1-2-2V7Z"/><path d="M4 8h15"/><path d="M16 13h2"/>',
-  file: '<path d="M7 3h7l5 5v13H7V3Z"/><path d="M14 3v5h5"/><path d="M9 14h6"/><path d="M9 17h6"/>'
+  file: '<path d="M7 3h7l5 5v13H7V3Z"/><path d="M14 3v5h5"/><path d="M9 14h6"/><path d="M9 17h6"/>',
+  chevron: '<path d="m9 18 6-6-6-6"/>',
+  bell: '<path d="M6 8a6 6 0 1 1 12 0c0 7 3 8 3 8H3s3-1 3-8Z"/><path d="M10 21a2 2 0 0 0 4 0"/>',
+  info: '<circle cx="12" cy="12" r="9"/><path d="M12 8h.01"/><path d="M11 12h1v4h1"/>',
+  shield: '<path d="M12 3 4 6v6c0 5 4 8 8 9 4-1 8-4 8-9V6l-8-3Z"/>',
+  sparkles: '<path d="M12 4v4"/><path d="M12 16v4"/><path d="M4 12h4"/><path d="M16 12h4"/><path d="m6 6 2 2"/><path d="m16 16 2 2"/><path d="m6 18 2-2"/><path d="m16 8 2-2"/>'
 }
 
 const ICON_PICKER_GROUPS = [
@@ -1442,6 +1447,45 @@ function filteredIconGroups() {
       return [group, filtered]
     })
     .filter(([, choices]) => choices.length)
+}
+
+function settingsChevron() {
+  return `<span class="settings-row-chevron" aria-hidden="true"><svg viewBox="0 0 8 14"><path d="M1 1l5 6-5 6"/></svg></span>`
+}
+
+function settingsRow(options = {}) {
+  const action = options.action ? `data-action="${attr(options.action)}"` : ""
+  const view = options.view ? `data-view="${attr(options.view)}"` : ""
+  const id = options.id ? `data-id="${attr(options.id)}"` : ""
+  const step = options.step !== undefined ? `data-step="${attr(options.step)}"` : ""
+  const tint = options.tint ? `tint-${attr(options.tint)}` : ""
+  const iconHtml = options.emoji
+    ? `<span class="settings-row-icon ${tint}">${esc(options.emoji)}</span>`
+    : `<span class="settings-row-icon ${tint}">${icon(options.icon || "settings")}</span>`
+  const right = options.value
+    ? `<span class="settings-row-side"><span>${esc(options.value)}</span>${options.action ? settingsChevron() : ""}</span>`
+    : options.action ? settingsChevron() : ""
+  return `
+    <button class="settings-row" ${action} ${view} ${id} ${step}>
+      ${iconHtml}
+      <span class="settings-row-main">
+        <span class="settings-row-title">${esc(options.title)}</span>
+        ${options.copy ? `<span class="settings-row-copy">${esc(options.copy)}</span>` : ""}
+      </span>
+      ${right}
+    </button>
+  `
+}
+
+function settingsSection(label, ...rows) {
+  return `
+    <section class="settings-section">
+      ${label ? `<div class="settings-section-label">${esc(label)}</div>` : ""}
+      <div class="settings-card">
+        ${rows.filter(Boolean).join("")}
+      </div>
+    </section>
+  `
 }
 
 function emptyState(options = {}) {
@@ -2183,7 +2227,24 @@ function renderCategoryPills(selectedId, action) {
 }
 
 function savedTimeLabel(value, emptyText) {
-  return value ? new Date(value).toLocaleString("en-US") : emptyText
+  if (!value) return emptyText
+  const now = Date.now()
+  const diff = now - Number(value)
+  if (diff < 0) return new Date(value).toLocaleString("en-US")
+  if (diff < 45 * 1000) return "just now"
+  if (diff < 90 * 1000) return "1 min ago"
+  const mins = Math.round(diff / 60000)
+  if (mins < 60) return `${mins} min ago`
+  const hours = Math.round(diff / 3600000)
+  if (hours < 24) return `${hours} hr ago`
+  const days = Math.round(diff / 86400000)
+  if (days < 7) return `${days}d ago`
+  return new Date(value).toLocaleDateString("en-US", { month: "short", day: "numeric" })
+}
+
+function pluralize(count, singular, plural) {
+  const n = Number(count) || 0
+  return `${n} ${n === 1 ? singular : (plural || singular + "s")}`
 }
 
 function getDataSummary() {
@@ -2609,60 +2670,133 @@ function renderAccount() {
   const summary = getDataSummary()
   const signedIn = !!app.cloudUser
   const installed = isStandaloneApp()
-  const installCopy = installed
-    ? "You are already using Budget Tracker from your Home Screen."
-    : "Save Budget Tracker to your Home Screen so it feels like a real app."
+  const monthsLabel = pluralize(summary.monthCount, "month")
+  const txLabel = pluralize(summary.txCount, "transaction")
+  const savedLabel = summary.saved && summary.saved !== "not saved yet" ? `saved ${summary.saved}` : "not saved yet"
+  const cloudSubtitle = signedIn
+    ? (app.cloudBusy ? "Syncing now…" : `Synced ${summary.cloudSaved}`)
+    : "Sign in to keep your data backed up"
 
   return `
     <section class="view">
-      ${header("Account", signedIn ? app.cloudEmail : "Local-first budget tracker")}
+      ${header("Account", signedIn ? esc(app.cloudEmail) : "Local-first budget tracker")}
       <div class="scroll account-scroll">
         <div class="account-card">
           <div class="account-avatar">${icon(signedIn ? "account" : "wallet")}</div>
           <div class="account-main">
             <div class="account-name">${signedIn ? esc(app.cloudEmail) : "Not signed in"}</div>
-            <div class="account-meta">${summary.monthCount} months · ${summary.txCount} transactions · saved ${esc(summary.saved)}</div>
+            <div class="account-meta">${esc(monthsLabel)} · ${esc(txLabel)} · ${esc(savedLabel)}</div>
           </div>
         </div>
 
-        ${renderCloudPanel()}
+        ${settingsSection("Library",
+          settingsRow({
+            action: "go", view: "review",
+            icon: "upload", tint: "acc",
+            title: "Analyze Statements",
+            copy: "Find stable spend and leaks"
+          }),
+          settingsRow({
+            action: "openMethod", step: hasCompletedMethod() ? 1 : 0,
+            icon: "wallet", tint: "grn",
+            title: "Find My Pool",
+            copy: hasCompletedMethod() ? "Edit your tracking pool" : "Income minus stable expenses"
+          }),
+          settingsRow({
+            action: "go", view: "cats",
+            icon: "grid", tint: "blue",
+            title: "Budgets",
+            copy: "Categories and monthly limits"
+          }),
+          settingsRow({
+            action: "go", view: "presets",
+            icon: "sparkles", tint: "amber",
+            title: "Presets",
+            copy: "Reusable quick expenses"
+          }),
+          settingsRow({
+            action: "go", view: "wishes",
+            icon: "heart", tint: "red",
+            title: "Wishlist",
+            copy: "Planned purchases"
+          })
+        )}
 
-        <div class="account-panel">
-          <div class="panel-head">
-            <div>
-              <div class="section-label">Manage</div>
-              <div class="panel-title">App tools</div>
+        <section class="settings-section">
+          <div class="settings-section-label">Appearance</div>
+          <div class="settings-card">
+            <div class="settings-block">
+              <div class="settings-block-title">Theme</div>
+              ${renderThemeSegments()}
             </div>
-            ${icon("settings", "", "panel-icon")}
           </div>
-          <div class="tool-grid">
-            ${renderActionToolCard("openStory", "file", "Read Ezra's note", "Why this app exists")}
-            ${renderToolCard("review", "upload", "Analyze Statements", "Find stable spend and leaks")}
-            ${renderActionToolCard("openMethod", "wallet", "Find My Pool", hasCompletedMethod() ? "Edit tracking pool" : "Income minus stable expenses", `data-step="${hasCompletedMethod() ? 1 : 0}"`)}
-            ${renderToolCard("cats", "grid", "Budgets", "Categories and monthly limits")}
-            ${renderToolCard("presets", "settings", "Presets", "Reusable quick expenses")}
-            ${renderToolCard("wishes", "heart", "Wishlist", "Planned purchases")}
-          </div>
-        </div>
+        </section>
 
-        ${renderThemePanel()}
+        ${settingsSection("Backup",
+          settingsRow({
+            action: "openCloudSheet",
+            icon: "cloud", tint: signedIn ? "grn" : "acc",
+            title: signedIn ? "Cloud backup" : "Sign in to back up",
+            copy: cloudSubtitle
+          }),
+          settingsRow({
+            action: "exportJSON",
+            icon: "download", tint: "mut",
+            title: "Export full JSON",
+            copy: `${esc(monthsLabel)} of data`
+          }),
+          settingsRow({
+            action: "exportCSV",
+            icon: "download", tint: "mut",
+            title: "Export this month as CSV",
+            copy: monthLabel(app.key)
+          }),
+          settingsRow({
+            action: "importJSON",
+            icon: "upload", tint: "red",
+            title: "Import JSON",
+            copy: "Replace local data from a backup"
+          })
+        )}
 
-        ${renderBackupPanel()}
+        ${settingsSection("About",
+          settingsRow({
+            action: "openInstallCoach",
+            icon: installed ? "check" : "download",
+            tint: installed ? "grn" : "acc",
+            title: installed ? "Installed on this device" : "Install on this phone",
+            copy: installed ? "Running from your Home Screen" : "Save it to feel like a real app"
+          }),
+          settingsRow({
+            action: "openStory",
+            icon: "file", tint: "blue",
+            title: "Read Ezra's note",
+            copy: "Why this app exists"
+          })
+        )}
 
-        <div class="account-panel">
-          <div class="panel-head">
-            <div>
-              <div class="section-label">App</div>
-              <div class="panel-title">Install on this phone</div>
-            </div>
-            ${icon("download", "", "panel-icon")}
-          </div>
-          <div class="data-note install-note">${installCopy}</div>
-          <button class="${installed ? "secondary-btn" : "primary-btn"}" data-action="openInstallCoach">${icon(installed ? "check" : "download")} ${installed ? "View Install Status" : "Show Me How"}</button>
-        </div>
+        <div class="version-stamp">Budget Tracker · v${esc(APP_VERSION)}</div>
       </div>
       ${nav()}
     </section>
+  `
+}
+
+function renderThemeSegments() {
+  const themes = [
+    { key: "auto", label: "Auto", desc: "Match system" },
+    { key: "light", label: "Light", desc: "Always light" },
+    { key: "dark", label: "Dark", desc: "Always dark" }
+  ]
+  return `
+    <div class="theme-segments" role="group" aria-label="Theme">
+      ${themes.map(t => `
+        <button class="theme-chip ${app.theme === t.key ? "active" : ""}" data-action="setTheme" data-value="${attr(t.key)}" aria-pressed="${app.theme === t.key ? "true" : "false"}">
+          <strong>${esc(t.label)}</strong>
+          <small>${esc(t.desc)}</small>
+        </button>
+      `).join("")}
+    </div>
   `
 }
 
@@ -2725,6 +2859,25 @@ function renderModal() {
   if (app.modal === "iconPicker") modalEl.innerHTML = renderIconPickerModal()
   if (app.modal === "confirm") modalEl.innerHTML = renderConfirmModal()
   if (app.modal === "quickAdd") modalEl.innerHTML = renderQuickAddModal()
+  if (app.modal === "cloud") modalEl.innerHTML = renderCloudModal()
+}
+
+function renderCloudModal() {
+  return `
+    <div class="sheet cloud-sheet" role="dialog" aria-modal="true" aria-label="Cloud backup">
+      <div class="sheet-top">
+        <div class="sheet-title">Cloud backup</div>
+        <button class="sheet-close" aria-label="Close" data-action="closeModal">${icon("close")}</button>
+      </div>
+      ${renderCloudPanel()}
+    </div>
+  `
+}
+
+function openCloudSheet() {
+  haptic("light")
+  app.modal = "cloud"
+  renderModal()
 }
 
 function renderQuickAddModal() {
@@ -3481,6 +3634,7 @@ function handleClick(event) {
   if (action === "openQuickAdd") openQuickAdd()
   if (action === "chooseQuickCat") chooseQuickCat(id)
   if (action === "saveQuickExpense") saveQuickExpense()
+  if (action === "openCloudSheet") openCloudSheet()
 }
 
 function go(view) {
