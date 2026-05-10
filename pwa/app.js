@@ -1,5 +1,5 @@
 const STORAGE_KEY = "budget_tracker_pwa_v1"
-const APP_VERSION = "24"
+const APP_VERSION = "25"
 const ROLLOVER_START_KEY = "2026-4"
 const REVIEW_REQUIRED_MONTHS = 4
 const REVIEW_HANDOFF_URL = `https://ezratawachi.github.io/scriptable-budget-tracker/pwa/?v=${APP_VERSION}&review=1`
@@ -1482,18 +1482,17 @@ function quickFAB() {
 
 function nav() {
   const items = [
-    ["home", "dashboard", "Dashboard"],
-    ["add", "add", "Add"],
+    ["home", "dashboard", "Home"],
     ["log", "activity", "Activity"],
     ["account", "account", "Account"]
   ]
 
   return `
-    <nav class="nav">
+    <nav class="nav" role="tablist" aria-label="Main">
       ${items.map(([view, iconName, label]) => `
-        <button class="nav-btn ${app.view === view ? "active" : ""}" data-action="go" data-view="${view}">
+        <button class="nav-btn ${app.view === view ? "active" : ""}" role="tab" aria-selected="${app.view === view ? "true" : "false"}" data-action="go" data-view="${view}">
           ${icon(iconName, "", "nav-icon")}
-          ${label}
+          <span class="nav-label">${label}</span>
         </button>
       `).join("")}
     </nav>
@@ -1538,21 +1537,9 @@ function renderHome() {
         <div class="hero-label">${left < 0 ? "Over budget" : "Available"}</div>
         <div class="hero-amount" data-value="${Math.abs(left)}" style="color:${left < 0 ? "var(--red)" : "var(--txt)"}">${money0(Math.abs(left))}</div>
         <div class="hero-sub">${fmt(totalSpent)} spent of ${fmt(totalBudget)}${rollText}</div>
-        <div class="status-pill" style="color:${health.color};background:${health.bg};border-color:${health.border}">${esc(health.text)}</div>
-
-        <div class="kpis">
-          <div class="kpi">
-            <div class="kpi-label">Spent</div>
-            <div class="kpi-value">${fmt(totalSpent)}</div>
-          </div>
-          <div class="kpi">
-            <div class="kpi-label">Limit</div>
-            <div class="kpi-value">${fmt(totalBudget)}</div>
-          </div>
-          <div class="kpi">
-            <div class="kpi-label">Used</div>
-            <div class="kpi-value" style="color:${globalPct > 90 ? "var(--red)" : globalPct > 70 ? "var(--amb)" : "var(--txt)"}">${Math.round(globalPct)}%</div>
-          </div>
+        <div class="hero-meta">
+          <span class="status-pill" style="color:${health.color};background:${health.bg};border-color:${health.border}">${esc(health.text)}</span>
+          <span class="hero-used">${Math.round(globalPct)}% used</span>
         </div>
       </div>
 
