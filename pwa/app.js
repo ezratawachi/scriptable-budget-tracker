@@ -1,5 +1,5 @@
 const STORAGE_KEY = "budget_tracker_pwa_v1"
-const APP_VERSION = "22"
+const APP_VERSION = "23"
 const ROLLOVER_START_KEY = "2026-4"
 const REVIEW_REQUIRED_MONTHS = 4
 const REVIEW_HANDOFF_URL = `https://ezratawachi.github.io/scriptable-budget-tracker/pwa/?v=${APP_VERSION}&review=1`
@@ -1783,7 +1783,7 @@ function renderReviewWorkspace(context, totals) {
 
     <div class="review-section-head">
       <div>
-        <div class="section-label">Categories</div>
+        <div class="section-label">Spending types</div>
         <div class="review-subtitle">Tap what you are comfortable not tracking.</div>
       </div>
       <button class="text-btn" data-action="clearReviewSelection">Clear</button>

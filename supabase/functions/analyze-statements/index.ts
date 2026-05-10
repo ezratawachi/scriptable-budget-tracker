@@ -35,6 +35,16 @@ type NormalizedTransaction = {
   signature: string
 }
 
+type Classification = {
+  category: string
+  subcategory: string
+  merchant?: string
+}
+
+type Rule = Classification & {
+  pattern: RegExp
+}
+
 function jsonResponse(body: unknown, status = 200) {
   return new Response(JSON.stringify(body), {
     status,
@@ -61,6 +71,32 @@ const DESCRIPTION_HEADERS = ["description", "merchant", "payee", "memo", "name",
 const AMOUNT_HEADERS = ["amount", "importe", "monto", "valor", "value", "total", "debit", "debito", "debit", "charge", "cargo", "withdrawal", "retiro", "payment", "pago"]
 const DEBIT_HEADERS = ["debit", "debito", "debit", "charge", "cargo", "withdrawal", "retiro", "paid out", "salida"]
 const CREDIT_HEADERS = ["credit", "credito", "abono", "deposit", "paid in", "entrada"]
+const CANONICAL_CATEGORIES = [
+  "Groceries",
+  "Gas",
+  "Housing",
+  "Utilities",
+  "Insurance",
+  "Phone & Internet",
+  "Household Basics",
+  "Healthcare",
+  "Bank Fees",
+  "Cash",
+  "Coffee",
+  "Restaurants",
+  "Delivery",
+  "Online Shopping",
+  "Clothes",
+  "Rideshare",
+  "Entertainment",
+  "Subscriptions",
+  "Business Experiments",
+  "Travel",
+  "Gifts",
+  "Extras",
+  "Needs Review"
+]
+const VAGUE_CATEGORIES = new Set(["shopping", "food & dining", "food", "dining", "bills", "transport", "transportation", "cash & fees", "misc", "miscellaneous", "other", "uncategorized", "extras", "needs review", "general"])
 const MONTHS: Record<string, string> = {
   jan: "01",
   january: "01",
@@ -279,10 +315,11 @@ function likelyNotExpense(description: string, amount: number) {
   if (amount === 0) return true
   if (/\b(beginning|ending|available|daily)\s+balance\b/.test(text)) return true
   if (/^total\b|\btotal\s+(fees|debits|credits|subtractions)\b/.test(text)) return true
-  if (/\b(direct deposit|payroll|deposit from|mobile check deposit|interest paid|payment from|zelle payment from|credit from|refund|reversal|reversed)\b/.test(text)) return true
+  if (/\b(direct deposit|payroll|remote online deposit|deposit id number|deposit from|mobile check deposit|interest paid|payment from|zelle payment from|zelle from|credit from|refund|reversal|reversed)\b/.test(text)) return true
+  if (/\bdeposit\b/.test(text) && !/\bsecurity deposit\b/.test(text)) return true
   if (/\btransfer (from|to) (sav|saving|savings|chk|checking)\b/.test(text)) return true
   if (/\bonline banking transfer (from|to)\b/.test(text)) return true
-  if (/\bpayment to crd\b|\bcredit card payment\b/.test(text)) return true
+  if (/\bpayment to crd\b|\bcredit card payment\b|\bcredit crd\b|\bcrd autopay\b|\bcard autopay\b/.test(text)) return true
   return false
 }
 
@@ -434,6 +471,137 @@ function makeId(value: string) {
   return `review_${Math.abs(hash).toString(36)}`
 }
 
+function canonicalLabel(value: unknown) {
+  const text = normalizeText(value)
+  return CANONICAL_CATEGORIES.find(category => normalizeText(category) === text) || ""
+}
+
+function cleanedMerchant(description: string, suggested = "") {
+  const base = cleanText(description || suggested)
+    .replace(/\b(POS DEBIT|CHECKCARD|DEBIT CARD PURCHASE|PURCHASE AUTHORIZED ON \d{1,2}[/-]\d{1,2}|RECURRING PAYMENT AUTHORIZED ON \d{1,2}[/-]\d{1,2}|ONLINE BANKING PAYMENT TO|DIRECT DEBIT|WEB PMTS|ELEC PYMT|PAYMENT)\b/gi, " ")
+    .replace(/\b(PPD ID|WEB ID|CONF(?:IRMATION)?#?|REF#?|AUTH(?:ORIZATION)?|CARD|TRACE|ID)[:#]?\s*[A-Z0-9*-]+\b.*$/i, "")
+    .replace(/\b\d{2}[/-]\d{2}(?:[/-]\d{2,4})?\b/g, " ")
+    .replace(/\b[#*]?\d{3,}\b/g, " ")
+    .replace(/\b(MIAMI|DORAL|NEW YORK|BROOKLYN|TAMPA|LOS ANGELES|SAN FRANCISCO|CHICAGO|WA|CA|FL|NY|TX|NJ|PA|USA|US|UK|ES|MX|PA|CO|BR)\b.*$/i, "")
+    .replace(/\s{2,}/g, " ")
+    .trim()
+  return titleCase(base || cleanText(suggested) || "Transaction")
+}
+
+const RULES: Rule[] = [
+  { pattern: /\b(uber\s*eats|ubereats|doordash|door dash|rappi|glovo|deliveroo|postmates|grubhub|just eat)\b/, category: "Delivery", subcategory: "Food Delivery" },
+  { pattern: /\b(starbucks|dunkin|tim hortons|costa coffee|juan valdez|nespresso|coffee|cafe|cafeteria|espresso)\b/, category: "Coffee", subcategory: "Coffee Shops" },
+  { pattern: /\b(costco|sam'?s club|bjs wholesale|bj'?s wholesale|price ?smart|makro)\b/, category: "Groceries", subcategory: "Wholesale Clubs" },
+  { pattern: /\b(publix|whole foods|trader joe|kroger|safeway|aldi|lidl|winn ?dixie|food lion|shoprite|carrefour|mercadona|super marke|supermarket|super market|grocery|groceries|supermercado|mercado|colmado|abarrotes|tesco|sainsbury|asda)\b/, category: "Groceries", subcategory: "Supermarkets" },
+  { pattern: /\b(shell|exxon|exxonmobil|mobil|chevron|bp|texaco|sunoco|esso|repsol|pemex|terpel|petrobras|gasolinera|gasolina|combustible|fuel|service station)\b/, category: "Gas", subcategory: "Fuel" },
+  { pattern: /\b(uber(?!\s*eats)|lyft|cabify|didi|bolt|taxi|rideshare|help\.uber\.com)\b/, category: "Rideshare", subcategory: "Rides" },
+  { pattern: /\b(amazon|amzn|etsy|ebay|aliexpress|temu|mercado\s*libre|mercadolibre|shopify|online shopping)\b/, category: "Online Shopping", subcategory: "Marketplaces" },
+  { pattern: /\b(zara|h&m|hm\.com|uniqlo|gap|old navy|nike|adidas|shein|clothes|clothing|apparel|ropa|vestimenta|calzado|shoes)\b/, category: "Clothes", subcategory: "Apparel" },
+  { pattern: /\b(mcdonald|burger king|wendy|chipotle|kfc|taco bell|pizza|sushi|restaurant|restaurante|diner|grill|bar & grill|steakhouse|pizzeria|cocina|food truck)\b/, category: "Restaurants", subcategory: "Dining Out" },
+  { pattern: /\b(netflix|spotify|hulu|disney\+?|youtube premium|prime video|apple\.com\/bill|icloud|patreon|subscription|suscripcion|recurring)\b/, category: "Subscriptions", subcategory: "Digital Subscriptions" },
+  { pattern: /\b(openai|anthropic|claude|github|vercel|digitalocean|aws|google cloud|cloudflare|api|saas)\b/, category: "Business Experiments", subcategory: "Tools & Experiments" },
+  { pattern: /\b(fpl|electric|electricity|energia|energ[iy]a|water bill|agua|utility|utilities|con edison|edison|electricidad|power)\b/, category: "Utilities", subcategory: "Utilities" },
+  { pattern: /\b(comcast|xfinity|at&t|att mobility|t-mobile|tmobile|verizon|claro|movistar|vodafone|orange|digicel|internet|cable|phone|telefono|telecom|mobility)\b/, category: "Phone & Internet", subcategory: "Phone & Internet" },
+  { pattern: /\b(geico|progressive|state farm|allstate|insurance|seguro|assurance|aseguradora)\b/, category: "Insurance", subcategory: "Insurance" },
+  { pattern: /\b(rent|landlord|alquiler|renta|mortgage|hipoteca)\b/, category: "Housing", subcategory: "Rent & Mortgage" },
+  { pattern: /\b(cvs|walgreens|pharmacy|farmacia|doctor|clinic|hospital|medical|health|salud)\b/, category: "Healthcare", subcategory: "Health & Pharmacy" },
+  { pattern: /\b(home depot|lowe'?s|ikea|household|cleaning supplies|target|walmart)\b/, category: "Household Basics", subcategory: "Home & Household" },
+  { pattern: /\b(atm fee|maintenance fee|monthly fee|overdraft|insufficient funds|international transaction fee|service fee|bank fee|fee)\b/, category: "Bank Fees", subcategory: "Bank Fees" },
+  { pattern: /\b(atm|cash withdrawal|withdrawal|withdrwl|cajero|efectivo)\b/, category: "Cash", subcategory: "ATM Withdrawals" },
+  { pattern: /\b(airbnb|hotel|airline|flight|delta|american airlines|united airlines|jetblue|train|rail|booking\.com|expedia|travel|viaje)\b/, category: "Travel", subcategory: "Travel" },
+  { pattern: /\b(cinema|movie|theater|theatre|eventbrite|concert|ticketmaster|game|gaming|entertainment|entretenimiento)\b/, category: "Entertainment", subcategory: "Entertainment" },
+  { pattern: /\b(gift|regalo|donation|donacion)\b/, category: "Gifts", subcategory: "Gifts & Donations" }
+]
+
+function knownMerchant(description: string) {
+  const text = normalizeText(description)
+  const merchants: Array<[RegExp, string]> = [
+    [/\b(publix)\b/, "Publix"],
+    [/\b(costco)\b/, "Costco"],
+    [/\b(whole foods)\b/, "Whole Foods"],
+    [/\b(trader joe)\b/, "Trader Joe's"],
+    [/\b(starbucks)\b/, "Starbucks"],
+    [/\b(dunkin)\b/, "Dunkin"],
+    [/\b(uber\s*eats|ubereats)\b/, "Uber Eats"],
+    [/\b(uber|help\.uber\.com)\b/, "Uber"],
+    [/\b(lyft)\b/, "Lyft"],
+    [/\b(amazon|amzn)\b/, "Amazon"],
+    [/\b(etsy)\b/, "Etsy"],
+    [/\b(shell)\b/, "Shell"],
+    [/\b(exxon|exxonmobil)\b/, "ExxonMobil"],
+    [/\b(chevron)\b/, "Chevron"],
+    [/\b(mobil)\b/, "Mobil"],
+    [/\b(netflix)\b/, "Netflix"],
+    [/\b(spotify)\b/, "Spotify"],
+    [/\b(apple\.com\/bill|apple)\b/, "Apple"],
+    [/\b(fpl)\b/, "FPL"],
+    [/\b(comcast|xfinity)\b/, "Comcast"],
+    [/\b(at&t|att mobility)\b/, "AT&T"],
+    [/\b(geico)\b/, "GEICO"],
+    [/\b(target)\b/, "Target"],
+    [/\b(walmart)\b/, "Walmart"],
+    [/\b(cvs)\b/, "CVS"],
+    [/\b(walgreens)\b/, "Walgreens"],
+    [/\b(home depot)\b/, "Home Depot"],
+    [/\b(openai)\b/, "OpenAI"],
+    [/\b(anthropic|claude)\b/, "Claude"],
+    [/\b(digitalocean)\b/, "DigitalOcean"]
+  ]
+  return merchants.find(([pattern]) => pattern.test(text))?.[1] || ""
+}
+
+function classifyDescription(description: string, suggestedCategory = "", suggestedSubcategory = ""): Classification {
+  const text = normalizeText(description)
+  const rule = RULES.find(item => item.pattern.test(text))
+  if (rule) {
+    return {
+      category: rule.category,
+      subcategory: rule.subcategory,
+      merchant: rule.merchant
+    }
+  }
+
+  const canonical = canonicalLabel(suggestedCategory)
+  if (canonical && !VAGUE_CATEGORIES.has(normalizeText(canonical))) {
+    return {
+      category: canonical,
+      subcategory: cleanText(suggestedSubcategory, "General")
+    }
+  }
+
+  return {
+    category: "Needs Review",
+    subcategory: "Unclear"
+  }
+}
+
+function canonicalizeTransaction(tx: NormalizedTransaction): NormalizedTransaction {
+  const sourceText = [tx.originalDescription, tx.merchant, tx.category, tx.subcategory].filter(Boolean).join(" ")
+  const classification = classifyDescription(sourceText, tx.category, tx.subcategory)
+  const merchant = classification.merchant || knownMerchant(sourceText) || cleanedMerchant(tx.originalDescription, tx.merchant)
+  const category = classification.category
+  const subcategory = classification.subcategory || (category === "Needs Review" ? "Unclear" : "General")
+  const signature = [
+    tx.monthKey,
+    tx.dateISO,
+    merchant,
+    category,
+    subcategory,
+    tx.amount.toFixed(2),
+    tx.originalDescription,
+    tx.sourceName
+  ].join("|")
+
+  return {
+    ...tx,
+    merchant,
+    category,
+    subcategory,
+    confidence: category === "Needs Review" ? Math.min(tx.confidence, 0.55) : tx.confidence,
+    signature
+  }
+}
+
 function normalizeTransaction(row: Record<string, unknown>, index: number): NormalizedTransaction | null {
   const amount = Math.abs(Number(row.amount))
   const dateISO = toDateISO(row.dateISO ?? row.date)
@@ -458,7 +626,7 @@ function normalizeTransaction(row: Record<string, unknown>, index: number): Norm
     sourceName
   ].join("|")
 
-  return {
+  return canonicalizeTransaction({
     id: cleanText(row.id) || makeId(`${signature}|${index}`),
     monthKey,
     dateISO: dateISO || `${monthKey}-01`,
@@ -470,7 +638,7 @@ function normalizeTransaction(row: Record<string, unknown>, index: number): Norm
     sourceName,
     confidence,
     signature
-  }
+  })
 }
 
 async function readFileAsText(file: File): Promise<StatementFile> {
@@ -530,10 +698,15 @@ Rules:
 - Rent, groceries, gas, laundry, household basics, ATM cash withdrawals, fees, subscriptions, restaurants, coffee, Uber, clothing, and online shopping are valid expenses.
 - Amounts are already positive numbers.
 - Categorize by studying the description. Do not trust bank categories if any appear.
-- Use clear human categories/subcategories.
+- Use only these English category labels: ${CANONICAL_CATEGORIES.join(", ")}.
+- Group by spending type first. Supermarkets belong in Groceries, coffee shops in Coffee, rides in Rideshare, marketplaces in Online Shopping, utilities/insurance/phone bills in their own stable bill categories.
+- Use Needs Review instead of vague labels when the transaction is unclear.
+- Do not invent broad categories such as Shopping, Food & Dining, Bills, Transportation, Miscellaneous, or Uncategorized.
+- Use subcategory for the narrower pattern, such as Supermarkets, Wholesale Clubs, Coffee Shops, Rides, Marketplaces, Phone & Internet, Utilities, Insurance, Bank Fees.
+- Normalize merchant into a reusable merchant group, such as Publix, Costco, Starbucks, Amazon, Uber, FPL, Comcast, GEICO.
 - Preserve originalDescription exactly from description.
 - Keep sourceName as provided.
-- Language preference for category names: ${language || "en"}.
+- User language preference: ${language || "en"}. Category labels must still be English.
 
 Candidate rows JSON:
 ${JSON.stringify(candidates.slice(0, 550))}
@@ -566,12 +739,17 @@ Rules:
 - Interpret local money formats including decimal commas, decimal points, thousands separators, and currency symbols.
 - Amounts must be positive numbers.
 - Categorize by studying the transaction description, merchant, and context. Do not trust bank-provided categories if they are generic or wrong.
-- Use human categories and subcategories such as Groceries, Gas, Laundry, Bills, Household Basics, Coffee, Restaurants, Online Shopping, Clothes, Uber, Transport, Subscriptions, Business Experiments, Extras, Health, Travel, Gifts.
+- Use only these English category labels: ${CANONICAL_CATEGORIES.join(", ")}.
+- Group by spending type first. Supermarkets belong in Groceries, coffee shops in Coffee, rides in Rideshare, marketplaces in Online Shopping, utilities/insurance/phone bills in their own stable bill categories.
+- Use Needs Review instead of vague labels when the transaction is unclear.
+- Do not invent broad categories such as Shopping, Food & Dining, Bills, Transportation, Miscellaneous, or Uncategorized.
+- Use subcategory for the narrower pattern, such as Supermarkets, Wholesale Clubs, Coffee Shops, Rides, Marketplaces, Phone & Internet, Utilities, Insurance, Bank Fees.
+- Normalize merchant into a reusable merchant group, such as Publix, Costco, Starbucks, Amazon, Uber, FPL, Comcast, GEICO.
 - Preserve the original statement description.
 - Use ISO dates when possible.
 - Keep sourceName as the uploaded filename.
 - confidence should be 0 to 1.
-- Language preference for category names: ${language || "en"}.
+- User language preference: ${language || "en"}. Category labels must still be English.
 
 Files:
 ${joined}
@@ -644,7 +822,7 @@ function dedupeTransactions(rows: NormalizedTransaction[]) {
 function normalizeRows(rows: Record<string, unknown>[]) {
   return rows
     .map((row: Record<string, unknown>, index: number) => normalizeTransaction(row, index))
-    .filter((tx: NormalizedTransaction | null): tx is NormalizedTransaction => !!tx)
+    .filter((tx: NormalizedTransaction | null): tx is NormalizedTransaction => !!tx && !likelyNotExpense(tx.originalDescription, tx.amount))
 }
 
 function getToolRows(result: Record<string, unknown>) {
