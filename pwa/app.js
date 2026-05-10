@@ -2,6 +2,7 @@ const STORAGE_KEY = "budget_tracker_pwa_v1"
 const ROLLOVER_START_KEY = "2026-4"
 const SUPABASE_URL = "https://yafcgilvulnbczaizcbf.supabase.co"
 const SUPABASE_PUBLISHABLE_KEY = "sb_publishable_xVtese4jTfZsAkB2cgSkOw_b8Wl5ksT"
+const AI_FUNCTION_URL = SUPABASE_URL.replace(".supabase.co", ".functions.supabase.co") + "/analyze-statements"
 const CLOUD_SYNC_DELAY = 900
 
 const appEl = document.getElementById("app")
@@ -39,6 +40,8 @@ const app = {
   methodStep: 0,
   methodAutoOpened: false,
   installCoachNext: null,
+  reviewBusy: false,
+  reviewStatus: "",
   newPresetCat: null,
   newWishCat: null,
   installPrompt: null,
@@ -197,8 +200,10 @@ function ensureDataShape(data) {
     installCoachSeenAt: Number(method.installCoachSeenAt) || 0
   }
 
+  d._settings.review = ensureReviewShape(d._settings.review)
+
   if (!d._settings._meta || typeof d._settings._meta !== "object") d._settings._meta = {}
-  d._settings._meta.schemaVersion = 8
+  d._settings._meta.schemaVersion = 9
   d._settings._meta.lastSaved = Number(d._settings._meta.lastSaved) || 0
 
   Object.keys(d).forEach(key => {
@@ -215,6 +220,93 @@ function ensureDataShape(data) {
   })
 
   return d
+}
+
+function ensureReviewShape(review) {
+  const r = review && typeof review === "object" && !Array.isArray(review) ? review : {}
+  const tx = Array.isArray(r.transactions) ? r.transactions : []
+  const files = Array.isArray(r.files) ? r.files : []
+
+  return {
+    transactions: tx
+      .filter(Boolean)
+      .map((row, index) => normalizeReviewTransaction(row, index))
+      .filter(Boolean),
+    files: files
+      .filter(Boolean)
+      .map(file => ({
+        id: String(file.id || makeReviewId(file.name || "file", file.importedAt || Date.now())),
+        name: String(file.name || "Statement"),
+        transactionCount: Number(file.transactionCount) || 0,
+        importedAt: Number(file.importedAt) || Date.now()
+      })),
+    selectedCategories: normalizeStringArray(r.selectedCategories),
+    selectedStores: normalizeStringArray(r.selectedStores),
+    selectedTransactions: normalizeStringArray(r.selectedTransactions),
+    excludedStores: normalizeStringArray(r.excludedStores),
+    excludedTransactions: normalizeStringArray(r.excludedTransactions),
+    expandedCategories: normalizeStringArray(r.expandedCategories),
+    expandedStores: normalizeStringArray(r.expandedStores),
+    activePeriod: String(r.activePeriod || "average"),
+    stableMonthlyAmount: Number(r.stableMonthlyAmount) || 0,
+    updatedAt: Number(r.updatedAt) || 0
+  }
+}
+
+function normalizeStringArray(value) {
+  return Array.isArray(value)
+    ? value.filter(Boolean).map(String).filter((item, index, arr) => arr.indexOf(item) === index)
+    : []
+}
+
+function normalizeReviewTransaction(row, index = 0) {
+  if (!row || typeof row !== "object") return null
+
+  const amount = Math.abs(Number(row.amount) || 0)
+  const dateISO = String(row.dateISO || row.date || "").slice(0, 10)
+  const monthKeyValue = String(row.monthKey || (dateISO ? dateISO.slice(0, 7) : "") || "")
+  const merchant = String(row.merchant || row.store || row.payee || row.description || "Transaction").trim()
+  const category = String(row.category || "Uncategorized").trim()
+  const subcategory = String(row.subcategory || "General").trim()
+
+  if (!amount || !monthKeyValue || !merchant) return null
+
+  const sourceName = String(row.sourceName || row.fileName || "Statement")
+  const originalDescription = String(row.originalDescription || row.description || merchant)
+  const signature = String(row.signature || [
+    monthKeyValue,
+    dateISO,
+    merchant,
+    category,
+    subcategory,
+    amount.toFixed(2),
+    originalDescription,
+    sourceName
+  ].join("|"))
+
+  return {
+    id: String(row.id || makeReviewId(signature, index)),
+    monthKey: monthKeyValue,
+    dateISO: dateISO || `${monthKeyValue}-01`,
+    merchant,
+    category,
+    subcategory,
+    amount,
+    originalDescription,
+    sourceName,
+    confidence: Math.max(0, Math.min(1, Number(row.confidence) || 0.7)),
+    signature
+  }
+}
+
+function makeReviewId(value, salt = "") {
+  const text = String(value || "") + "|" + String(salt || "")
+  let hash = 0
+  for (let i = 0; i < text.length; i++) {
+    hash = ((hash << 5) - hash) + text.charCodeAt(i)
+    hash |= 0
+  }
+  return "review_" + Math.abs(hash).toString(36)
 }
 
 function loadData() {
@@ -1111,7 +1203,7 @@ function haptic(type = "light") {
 }
 
 function secondaryBackView(defaultView = "account") {
-  const secondaryViews = ["cats", "presets", "wishes"]
+  const secondaryViews = ["cats", "presets", "wishes", "review"]
   return app.returnView && !secondaryViews.includes(app.returnView) ? app.returnView : defaultView
 }
 
@@ -1567,6 +1659,186 @@ function renderWishCard(wish) {
   `
 }
 
+function renderReview() {
+  const context = reviewContext()
+  const hasTransactions = context.review.transactions.length > 0
+  const stable = reviewStableAmount(context)
+  const visibleTotal = reviewTotal(context.rows, context.divisor)
+  const income = Number(app.drafts.method.monthlyIncome) || Number(getMethod().monthlyIncome) || 0
+  const available = roundMoney(income - stable)
+
+  return `
+    <section class="view">
+      <div class="subheader">
+        <button class="back-btn" aria-label="Back" data-action="go" data-view="${secondaryBackView("account")}">${icon("back")}</button>
+        <div class="title">Analyze Statements</div>
+        <span></span>
+      </div>
+
+      <div class="scroll review-scroll">
+        <div class="review-hero">
+          <div class="section-label">Find your pool</div>
+          <div class="review-title">Discover what you do not need to track.</div>
+          <p>Upload a few months of statements. AI cleans and categorizes them, then you decide what feels stable and what feels like a leak.</p>
+          <div class="review-actions">
+            <button class="primary-btn" data-action="pickStatements" ${app.reviewBusy ? "disabled" : ""}>${icon("upload")} Upload Statements</button>
+            ${hasTransactions ? `<button class="secondary-btn" data-action="clearReview">${icon("trash")} Clear Review</button>` : ""}
+          </div>
+          <div class="review-status">${esc(app.reviewStatus || (hasTransactions ? "Raw files are not stored after processing." : "CSV, TXT, and Excel first. Upload 3-4 months if you can."))}</div>
+        </div>
+
+        ${hasTransactions ? renderReviewWorkspace(context, { stable, visibleTotal, income, available }) : renderReviewEmpty()}
+      </div>
+    </section>
+  `
+}
+
+function renderReviewEmpty() {
+  return `
+    <div class="empty review-empty">
+      <div class="empty-title">No statement review yet</div>
+      <div class="row-meta">This is where you will study your real spending before creating leak budgets.</div>
+    </div>
+  `
+}
+
+function renderReviewWorkspace(context, totals) {
+  const groups = buildReviewGroups(context)
+  const months = context.months
+  const canSavePool = totals.income > 0 && totals.stable > 0
+
+  return `
+    <div class="review-stats">
+      <div><span>Files</span><strong>${context.review.files.length}</strong></div>
+      <div><span>Months</span><strong>${months.length}</strong></div>
+      <div><span>Visible spend</span><strong>${fmt(totals.visibleTotal)}</strong></div>
+      <div><span>Stable selected</span><strong>${fmt(totals.stable)}</strong></div>
+    </div>
+
+    <div class="review-pool-card">
+      <div>
+        <div class="section-label">Tracking pool</div>
+        <div class="review-pool-title" id="review-pool-amount">${totals.income > 0 ? fmt(Math.max(0, totals.available)) : "Add income"}</div>
+        <p id="review-pool-copy">${totals.income > 0 ? "Available to split manually into leak budgets." : "Add monthly income to see what remains after stable expenses."}</p>
+      </div>
+      <div class="field-group review-income">
+        <div class="field-label">Monthly income</div>
+        <input class="field" id="review-income" type="number" inputmode="decimal" placeholder="$0.00" value="${attr(app.drafts.method.monthlyIncome || (getMethod().monthlyIncome ? String(getMethod().monthlyIncome) : ""))}">
+      </div>
+      <button class="primary-btn" id="save-review-pool" data-action="saveReviewPool" ${canSavePool ? "" : "disabled"}>${icon("check")} Save Pool</button>
+    </div>
+
+    <div class="review-periods">
+      ${renderReviewPeriodButton("average", "Monthly average", reviewTotal(context.review.transactions, Math.max(1, months.length)), context.active === "average")}
+      ${months.map(month => renderReviewPeriodButton(`month:${month}`, monthLabelFromISO(month), reviewTotal(context.review.transactions.filter(tx => tx.monthKey === month), 1), context.active === `month:${month}`)).join("")}
+    </div>
+
+    <div class="review-section-head">
+      <div>
+        <div class="section-label">Categories</div>
+        <div class="review-subtitle">Tap what you are comfortable not tracking.</div>
+      </div>
+      <button class="text-btn" data-action="clearReviewSelection">Clear</button>
+    </div>
+
+    <div class="review-category-list">
+      ${groups.length ? groups.map((group, index) => renderReviewGroup(group, totals.visibleTotal, index, context)).join("") : `<div class="empty compact-empty"><div class="empty-title">No transactions for this period</div></div>`}
+    </div>
+
+    <details class="review-ledger">
+      <summary>
+        <span>Transactions</span>
+        <strong>${context.rows.length}</strong>
+      </summary>
+      <div class="review-ledger-list">
+        ${context.rows.slice().sort((a, b) => b.dateISO.localeCompare(a.dateISO)).slice(0, 220).map(tx => renderReviewTransaction(tx, context)).join("")}
+      </div>
+    </details>
+  `
+}
+
+function renderReviewPeriodButton(key, label, amount, active) {
+  return `
+    <button class="review-period ${active ? "active" : ""}" data-action="setReviewPeriod" data-value="${attr(key)}">
+      <span>${esc(label)}</span>
+      <strong>${fmt(amount)}</strong>
+    </button>
+  `
+}
+
+function monthLabelFromISO(key) {
+  const [year, month] = String(key || "").split("-").map(Number)
+  if (!year || !month) return key
+  return new Date(year, month - 1, 1).toLocaleDateString("en-US", { month: "short", year: "numeric" })
+}
+
+function renderReviewGroup(group, total, index, context) {
+  const review = getReview()
+  const expanded = review.expandedCategories.includes(group.category)
+  const stableCount = group.rows.filter(isReviewTransactionStable).length
+  const mode = review.selectedCategories.includes(group.category) && stableCount === group.rows.length ? "selected" : stableCount > 0 ? "partial" : ""
+  const percent = total ? Math.round((group.amount / total) * 100) : 0
+  const color = generatedCategoryColor(index)
+
+  return `
+    <article class="review-group ${mode} ${expanded ? "expanded" : ""}" style="--cat:${color}" data-review-category="${attr(group.category)}">
+      <button class="review-group-main" data-action="toggleReviewCategory" data-id="${attr(group.category)}">
+        <span class="cat-dot"></span>
+        <span class="review-group-copy">
+          <strong class="clamp-1">${esc(group.category)}</strong>
+          <small>${stableCount ? `${stableCount} stable of ${group.rows.length}` : `${group.rows.length} transactions`}</small>
+        </span>
+        <span class="review-group-side">
+          <strong>${fmt(group.amount)}</strong>
+          <small>${percent}% visible</small>
+        </span>
+      </button>
+      <div class="mini-bar"><span style="width:${Math.min(100, percent)}%;background:${color}"></span></div>
+      <button class="review-detail" data-action="toggleReviewCategoryDetails" data-id="${attr(group.category)}">${expanded ? "Hide details" : "View details"}</button>
+      <div class="review-store-list">
+        ${group.stores.map(store => renderReviewStore(store, context)).join("")}
+      </div>
+    </article>
+  `
+}
+
+function renderReviewStore(store, context) {
+  const review = getReview()
+  const key = reviewStoreKey(store.category, store.merchant)
+  const expanded = review.expandedStores.includes(key)
+  const stableCount = store.rows.filter(isReviewTransactionStable).length
+  const mode = stableCount === store.rows.length && stableCount > 0 ? "selected" : stableCount > 0 ? "partial" : review.selectedCategories.includes(store.category) || review.selectedStores.includes(key) ? "excluded" : ""
+
+  return `
+    <div class="review-store ${mode} ${expanded ? "expanded" : ""}" data-review-store="${attr(key)}">
+      <button class="review-store-main" data-action="toggleReviewStore" data-id="${attr(key)}">
+        <span>
+          <strong class="clamp-1">${esc(store.merchant)}</strong>
+          <small class="clamp-1">${esc(store.subcategory)} · ${store.rows.length} tx</small>
+        </span>
+        <span>${fmt(store.amount)}</span>
+      </button>
+      ${store.rows.length > 1 ? `<button class="review-detail mini" data-action="toggleReviewStoreDetails" data-id="${attr(key)}">${expanded ? "Hide" : "Rows"}</button>` : ""}
+      <div class="review-transaction-list">
+        ${store.rows.map(tx => renderReviewTransaction(tx, context)).join("")}
+      </div>
+    </div>
+  `
+}
+
+function renderReviewTransaction(tx, context) {
+  const mode = reviewTransactionMode(tx)
+  return `
+    <button class="review-tx ${mode}" data-action="toggleReviewTransaction" data-id="${attr(tx.id)}">
+      <span>
+        <strong class="clamp-1">${esc(tx.merchant)}</strong>
+        <small class="clamp-2">${esc(tx.dateISO)} · ${esc(tx.originalDescription)} · ${esc(tx.sourceName)}</small>
+      </span>
+      <span>${fmt(reviewAmount(tx.amount, context.divisor))}</span>
+    </button>
+  `
+}
+
 function renderCategoryPills(selectedId, action) {
   return app.state.budgets.map(cat => {
     const color = cssColor(cat.color)
@@ -1640,6 +1912,141 @@ function getMethodSummary() {
     unassigned: roundMoney(pool - budgeted),
     suggested: Math.max(0, roundMoney((Number(method.monthlyIncome) || 0) - (Number(method.predictableExpensesTotal) || 0)))
   }
+}
+
+function getReview() {
+  app.data._settings.review = ensureReviewShape(app.data._settings.review)
+  return app.data._settings.review
+}
+
+function reviewMonths() {
+  return getReview().transactions
+    .map(tx => tx.monthKey)
+    .filter((value, index, arr) => value && arr.indexOf(value) === index)
+    .sort()
+}
+
+function reviewContext() {
+  const review = getReview()
+  const months = reviewMonths()
+  const requestedMonth = review.activePeriod && review.activePeriod.startsWith("month:")
+    ? review.activePeriod.replace("month:", "")
+    : ""
+  const active = requestedMonth && months.includes(requestedMonth)
+    ? `month:${requestedMonth}`
+    : "average"
+  const month = active.startsWith("month:") ? active.replace("month:", "") : ""
+  const rows = month
+    ? review.transactions.filter(tx => tx.monthKey === month)
+    : review.transactions
+  const divisor = month ? 1 : Math.max(1, months.length)
+
+  return { review, months, active, month, rows, divisor }
+}
+
+function reviewAmount(value, divisor) {
+  return roundMoney((Number(value) || 0) / Math.max(1, Number(divisor) || 1))
+}
+
+function reviewTotal(rows, divisor) {
+  return roundMoney(rows.reduce((sum, tx) => sum + reviewAmount(tx.amount, divisor), 0))
+}
+
+function reviewStoreKey(category, merchant) {
+  return `${category || "Uncategorized"}|||${merchant || "Transaction"}`
+}
+
+function parseReviewStoreKey(key) {
+  const [category, merchant] = String(key || "").split("|||")
+  return { category: category || "", merchant: merchant || "" }
+}
+
+function reviewSelectedSet(key) {
+  return new Set(normalizeStringArray(getReview()[key]))
+}
+
+function setReviewArray(key, set) {
+  getReview()[key] = Array.from(set).filter(Boolean)
+}
+
+function isReviewTransactionStable(tx) {
+  const review = getReview()
+  const selectedCategories = new Set(review.selectedCategories)
+  const selectedStores = new Set(review.selectedStores)
+  const selectedTransactions = new Set(review.selectedTransactions)
+  const excludedStores = new Set(review.excludedStores)
+  const excludedTransactions = new Set(review.excludedTransactions)
+  const storeKey = reviewStoreKey(tx.category, tx.merchant)
+
+  if (selectedCategories.has(tx.category)) {
+    if (excludedStores.has(storeKey)) return selectedTransactions.has(tx.id)
+    return !excludedTransactions.has(tx.id)
+  }
+
+  if (selectedStores.has(storeKey)) return !excludedTransactions.has(tx.id)
+
+  return selectedTransactions.has(tx.id)
+}
+
+function reviewTransactionMode(tx) {
+  if (isReviewTransactionStable(tx)) return "selected"
+  const review = getReview()
+  const storeKey = reviewStoreKey(tx.category, tx.merchant)
+  if (review.selectedCategories.includes(tx.category) || review.selectedStores.includes(storeKey)) return "excluded"
+  return ""
+}
+
+function buildReviewGroups(context = reviewContext()) {
+  const groups = new Map()
+
+  context.rows.forEach(tx => {
+    if (!groups.has(tx.category)) {
+      groups.set(tx.category, { category: tx.category, amount: 0, rows: [], stores: new Map() })
+    }
+
+    const group = groups.get(tx.category)
+    const amount = reviewAmount(tx.amount, context.divisor)
+    group.amount = roundMoney(group.amount + amount)
+    group.rows.push(tx)
+
+    if (!group.stores.has(tx.merchant)) {
+      group.stores.set(tx.merchant, {
+        category: tx.category,
+        merchant: tx.merchant,
+        subcategory: tx.subcategory || "General",
+        amount: 0,
+        rows: []
+      })
+    }
+
+    const store = group.stores.get(tx.merchant)
+    store.amount = roundMoney(store.amount + amount)
+    store.rows.push(tx)
+  })
+
+  return Array.from(groups.values()).map(group => ({
+    ...group,
+    stores: Array.from(group.stores.values()).sort((a, b) => b.amount - a.amount)
+  })).sort((a, b) => b.amount - a.amount)
+}
+
+function reviewStableRows(context = reviewContext()) {
+  return context.rows.filter(isReviewTransactionStable)
+}
+
+function reviewStableAmount(context = reviewContext()) {
+  return reviewTotal(reviewStableRows(context), context.divisor)
+}
+
+function reviewAvailablePool(context = reviewContext()) {
+  return roundMoney((Number(app.drafts.method.monthlyIncome) || Number(getMethod().monthlyIncome) || 0) - reviewStableAmount(context))
+}
+
+function saveReviewState() {
+  const review = getReview()
+  review.updatedAt = Date.now()
+  review.stableMonthlyAmount = reviewStableAmount()
+  saveData(app.data)
 }
 
 function syncMethodDraft() {
@@ -1863,7 +2270,8 @@ function renderAccount() {
           </div>
           <div class="tool-grid">
             ${renderActionToolCard("openStory", "file", "Read Ezra's note", "Why this app exists")}
-            ${renderActionToolCard("openMethod", "wallet", "Method", hasCompletedMethod() ? "Edit intentional pool" : "Optional setup", `data-step="${hasCompletedMethod() ? 1 : 0}"`)}
+            ${renderToolCard("review", "upload", "Analyze Statements", "Find stable spend and leaks")}
+            ${renderActionToolCard("openMethod", "wallet", "Find My Pool", hasCompletedMethod() ? "Edit tracking pool" : "Income minus stable expenses", `data-step="${hasCompletedMethod() ? 1 : 0}"`)}
             ${renderToolCard("cats", "grid", "Budgets", "Categories and monthly limits")}
             ${renderToolCard("presets", "settings", "Presets", "Reusable quick expenses")}
             ${renderToolCard("wishes", "heart", "Wishlist", "Planned purchases")}
@@ -2096,10 +2504,10 @@ function renderMethodModal() {
   ]
 
   return `
-    <div class="sheet method-sheet" role="dialog" aria-modal="true" aria-label="Budget method">
+    <div class="sheet method-sheet" role="dialog" aria-modal="true" aria-label="Find your tracking pool">
       <div class="sheet-top">
         <div>
-          <div class="sheet-title">Budget Method</div>
+          <div class="sheet-title">Find Your Tracking Pool</div>
           <div class="method-step-label">Step ${step + 1} of 3</div>
         </div>
         <button class="sheet-close" aria-label="Close" data-action="dismissMethod">${icon("close")}</button>
@@ -2125,23 +2533,23 @@ function renderMethodIntroModal() {
 
         <div class="story-content">
           <div class="story-eyebrow">A note from Ezra</div>
-          <h1>The number that made budgeting click.</h1>
+          <h1>A tracker for leaks, not your whole life.</h1>
 
           <p class="story-lede">Hey, I'm Ezra. This app started because the normal way of budgeting did not work for us as a couple.</p>
 
-          <p>At first, we tried tracking everything: groceries, bills, gas, household basics, all of it. Instead of making us feel clearer, it made money feel heavier.</p>
+          <p>At first, we tried the classic thing: tracking groceries, gas, laundry, bills, household basics, and every little category. It became hard, stressful, and honestly not very helpful.</p>
 
-          <p>The part that finally clicked was this: before you can create leak budgets, you need to know what your stable life already costs.</p>
+          <p>After a lot of trial and error, we reviewed several months of statements and saw something important. Those stable life expenses were usually in a similar range. They were part of our real life, and they were not the real problem.</p>
 
-          <p>Once we accepted the expenses we felt at peace with, we subtracted that number from our income. What was left became the money we wanted to manage on purpose.</p>
+          <p>The problem was the invisible leaks: a big online purchase out of nowhere, clothes, many coffees, restaurants, Uber rides, random extras, little experiments. Things we enjoyed, but did not want to become unconscious and unlimited.</p>
 
-          <p>That is where the real budgeting starts: coffee, restaurants, online shopping, Uber rides, random extras, little experiments. The things we enjoyed, but did not want to become invisible.</p>
+          <p>So this app has one simple daily job: track only the leaks you choose. Not your whole life. Not every grocery trip. Not every gallon of gas.</p>
 
-          <p>After that, daily budgeting got lighter. We did not need to keep staring at our whole life. We just needed to track the leak budgets we had chosen.</p>
+          <p>The setup job is different. First, you discover the monthly amount you are comfortable not tracking. Income minus that stable amount becomes the money you can split into leak budgets.</p>
 
-          <blockquote>This app is not here to track your whole life. It helps you find what is stable, choose your leaks, set simple limits, and enjoy spending without quiet stress.</blockquote>
+          <blockquote>This app is not here to track your whole life. It helps you choose your leaks, set simple limits, and enjoy spending without quiet stress.</blockquote>
 
-          <p class="story-example">Your leaks may be different from ours. That is the point.</p>
+          <p class="story-example">We are building AI statement review to help with that discovery. The AI organizes transactions; you decide what feels stable and what feels like a leak.</p>
         </div>
 
         <div class="story-actions">
@@ -2149,7 +2557,7 @@ function renderMethodIntroModal() {
             ? `<button class="primary-btn" data-action="dismissMethodIntro">${icon("check")} Close</button>`
             : `
               <button class="primary-btn" data-action="startTrackingLeaks">${icon("add")} Start Tracking Leaks</button>
-              <button class="text-btn story-method-link" data-action="startMethodSetup">Set Up My Method</button>
+              <button class="text-btn story-method-link" data-action="startMethodSetup">Find My Pool</button>
             `}
         </div>
       </div>
@@ -2200,19 +2608,19 @@ function renderInstallCoachModal() {
 function renderMethodNumbersStep() {
   return `
     <div class="method-body">
-      <div class="method-heading">Start with the life you already accept.</div>
-      <p class="method-copy-block">Enter your monthly income and the predictable expenses you feel at peace with. Income minus this number becomes your intentional pool.</p>
+      <div class="method-heading">Start with what you are comfortable not tracking.</div>
+      <p class="method-copy-block">Enter monthly income and the stable expenses you accept as part of real life. Income minus stable expenses equals money available for leak budgets.</p>
       <div class="field-group">
         <div class="field-label">Monthly income</div>
         <input class="field" id="method-income" type="number" inputmode="decimal" placeholder="$0.00" value="${attr(app.drafts.method.monthlyIncome)}">
       </div>
       <div class="field-group">
-        <div class="field-label">Predictable life expenses</div>
+        <div class="field-label">Stable expenses you will not track</div>
         <input class="field" id="method-predictable" type="number" inputmode="decimal" placeholder="$0.00" value="${attr(app.drafts.method.predictableExpensesTotal)}">
       </div>
       <div class="method-note">Rent, groceries, gas, bills, household basics, and other expenses you accept as part of your real lifestyle. The goal is clarity, not judgment.</div>
       <div class="sheet-actions">
-        <button class="secondary-btn" data-action="dismissMethod">Not Now</button>
+        <button class="secondary-btn" data-action="dismissMethod">Not now</button>
         <button class="primary-btn" id="method-numbers-next" data-action="methodNext" ${canContinueMethodNumbers() ? "" : "disabled"}>${icon("check")} Continue</button>
       </div>
     </div>
@@ -2225,14 +2633,14 @@ function renderMethodPoolStep() {
 
   return `
     <div class="method-body">
-      <div class="method-heading">Now choose your intentional pool.</div>
+      <div class="method-heading">Choose what is available for leak budgets.</div>
       <p class="method-copy-block">This is the amount you can split into leak budgets. Once those budgets exist, the daily job is simple: track only those leaks.</p>
       <div class="method-suggestion">
-        <span>Suggested from clarity</span>
+        <span>Income - stable expenses</span>
         <strong>${fmt(suggested)}</strong>
       </div>
       <div class="field-group">
-        <div class="field-label">Your intentional spending pool</div>
+        <div class="field-label">Tracking pool</div>
         <input class="field" id="method-pool" type="number" inputmode="decimal" placeholder="$0.00" value="${attr(currentPool)}">
       </div>
       <div class="method-note">This is permission, not punishment. You can enjoy what fits inside it.</div>
@@ -2255,7 +2663,7 @@ function renderMethodReviewStep() {
       <div class="method-heading">Your leak budgets start here.</div>
       <p class="method-copy-block">These are the categories you are choosing to manage with awareness, not guilt.</p>
       <div class="method-review-grid">
-        <div><span>Intentional pool</span><strong>${fmt(pool)}</strong></div>
+        <div><span>Tracking pool</span><strong>${fmt(pool)}</strong></div>
         <div><span>Budgeted leaks</span><strong>${fmt(budgeted)}</strong></div>
         <div class="${over ? "danger" : ""}"><span>${over ? "Over pool" : "Unassigned"}</span><strong>${fmt(Math.abs(unassigned))}</strong></div>
       </div>
@@ -2267,7 +2675,7 @@ function renderMethodReviewStep() {
           </div>
         `).join("") : `
           <div class="method-empty-budget">
-            No leak budgets yet. Finish the method, then create only the categories that actually feel like leaks.
+            No leak budgets yet. Finish this setup, then create only the categories that actually feel like leaks.
           </div>
         `}
       </div>
@@ -2336,7 +2744,8 @@ function render() {
     account: renderAccount,
     cats: renderCategories,
     presets: renderPresets,
-    wishes: renderWishes
+    wishes: renderWishes,
+    review: renderReview
   }
 
   appEl.innerHTML = (views[app.view] || renderHome)()
@@ -2416,6 +2825,11 @@ function handleInput(event) {
   if (target.id === "method-pool") {
     app.drafts.method.intentionalPool = target.value
     updateButtonState("method-pool-next", canConfirmMethodPool())
+  }
+
+  if (target.id === "review-income") {
+    app.drafts.method.monthlyIncome = target.value
+    updateReviewPoolPreview()
   }
 
   if (target.id === "cloud-email") {
@@ -2509,6 +2923,16 @@ function handleClick(event) {
   if (action === "methodBack") methodBack()
   if (action === "dismissMethod") dismissMethod()
   if (action === "saveMethod") saveMethod()
+  if (action === "pickStatements") pickStatementFiles()
+  if (action === "clearReview") clearReview()
+  if (action === "setReviewPeriod") setReviewPeriod(value)
+  if (action === "toggleReviewCategory") toggleReviewCategory(id)
+  if (action === "toggleReviewCategoryDetails") toggleReviewCategoryDetails(id)
+  if (action === "toggleReviewStore") toggleReviewStore(id)
+  if (action === "toggleReviewStoreDetails") toggleReviewStoreDetails(id)
+  if (action === "toggleReviewTransaction") toggleReviewTransaction(id)
+  if (action === "clearReviewSelection") clearReviewSelection()
+  if (action === "saveReviewPool") saveReviewPool()
   if (action === "setAuthMode") setAuthMode(mode)
   if (action === "cloudPasswordLogin") signInWithPassword()
   if (action === "cloudCreateAccount") createPasswordAccount()
@@ -2527,7 +2951,7 @@ function handleClick(event) {
 
 function go(view) {
   if (!view) return
-  const secondaryViews = ["cats", "presets", "wishes"]
+  const secondaryViews = ["cats", "presets", "wishes", "review"]
   if (secondaryViews.includes(view) && !secondaryViews.includes(app.view)) {
     app.returnView = app.view || "account"
   } else if (!secondaryViews.includes(view)) {
@@ -2594,7 +3018,7 @@ function methodNext() {
   }
 
   if (step === 1 && !canConfirmMethodPool()) {
-    toast("Choose your intentional pool")
+    toast("Choose your tracking pool")
     return
   }
 
@@ -2699,7 +3123,7 @@ function dismissMethod() {
   }
   closeModal(false)
   render()
-  if (wasIncomplete) toast("You can open Method anytime")
+  if (wasIncomplete) toast("You can find your pool anytime")
 }
 
 function saveMethod() {
@@ -2708,7 +3132,7 @@ function saveMethod() {
   const intentionalPool = Number(app.drafts.method.intentionalPool)
 
   if (monthlyIncome <= 0 || predictableExpensesTotal < 0 || intentionalPool <= 0) {
-    toast("Check the method numbers")
+    toast("Check the pool numbers")
     return
   }
 
@@ -2726,7 +3150,320 @@ function saveMethod() {
   saveData(app.data)
   render()
   haptic("success")
-  toast("Method saved")
+  toast("Pool saved")
+}
+
+function updateReviewPoolPreview() {
+  const context = reviewContext()
+  const stable = reviewStableAmount(context)
+  const income = Number(app.drafts.method.monthlyIncome) || 0
+  const available = Math.max(0, roundMoney(income - stable))
+  const title = document.getElementById("review-pool-amount")
+  const copy = document.getElementById("review-pool-copy")
+
+  if (title) title.textContent = income > 0 ? fmt(available) : "Add income"
+  if (copy) copy.textContent = income > 0
+    ? "Available to split manually into leak budgets."
+    : "Add monthly income to see what remains after stable expenses."
+  updateButtonState("save-review-pool", income > 0 && stable > 0)
+}
+
+function pickStatementFiles() {
+  if (app.reviewBusy) return
+
+  const input = document.createElement("input")
+  input.type = "file"
+  input.multiple = true
+  input.accept = ".csv,.tsv,.txt,.xlsx,.xls,text/csv,text/tab-separated-values,text/plain,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+  input.addEventListener("change", () => {
+    const files = Array.from(input.files || [])
+    analyzeStatementFiles(files)
+  }, { once: true })
+  input.click()
+}
+
+function reviewErrorMessage(error) {
+  const raw = error && error.message ? String(error.message) : "Statement analysis is unavailable right now."
+  if (/api key|anthropic|claude|secret|configured/i.test(raw)) {
+    return "AI analysis is not connected yet. Turn on the Claude connection, then try again."
+  }
+  if (/unsupported/i.test(raw)) return "That file type is not ready yet. Try CSV, TXT, Excel, or XLS."
+  return raw.length > 116 ? raw.slice(0, 113) + "..." : raw
+}
+
+async function analyzeStatementFiles(files) {
+  if (!files.length || app.reviewBusy) return
+
+  app.reviewBusy = true
+  app.reviewStatus = `Analyzing ${files.length} ${files.length === 1 ? "file" : "files"}...`
+  render()
+
+  try {
+    const form = new FormData()
+    files.forEach(file => form.append("files", file, file.name))
+    form.append("language", navigator.language || "en")
+
+    const response = await fetch(AI_FUNCTION_URL, {
+      method: "POST",
+      headers: { apikey: SUPABASE_PUBLISHABLE_KEY },
+      body: form
+    })
+    const payload = await response.json().catch(() => ({}))
+
+    if (!response.ok) throw new Error(payload.error || payload.message || "Could not analyze statements")
+
+    const added = mergeReviewExtraction(payload, files)
+    app.reviewStatus = added
+      ? `Added ${added} ${added === 1 ? "transaction" : "transactions"}. Raw files were not stored.`
+      : "No new transactions found. Try another statement or format."
+    haptic(added ? "success" : "medium")
+    toast(added ? "Statements analyzed" : "No new transactions")
+  } catch (error) {
+    const message = reviewErrorMessage(error)
+    app.reviewStatus = message
+    toast(message)
+  } finally {
+    app.reviewBusy = false
+    render()
+  }
+}
+
+function mergeReviewExtraction(payload, files = []) {
+  const txInput = Array.isArray(payload.transactions)
+    ? payload.transactions
+    : Array.isArray(payload.data?.transactions)
+    ? payload.data.transactions
+    : []
+  const review = getReview()
+  const existingSignatures = new Set(review.transactions.map(tx => tx.signature))
+  const existingIds = new Set(review.transactions.map(tx => tx.id))
+  const importedAt = Date.now()
+  let added = 0
+
+  txInput.forEach((row, index) => {
+    const tx = normalizeReviewTransaction(row, index + review.transactions.length)
+    if (!tx || existingSignatures.has(tx.signature)) return
+
+    while (existingIds.has(tx.id)) tx.id = makeReviewId(tx.signature, `${index}-${added}-${Math.random()}`)
+    review.transactions.push(tx)
+    existingSignatures.add(tx.signature)
+    existingIds.add(tx.id)
+    added++
+  })
+
+  review.transactions = review.transactions.sort((a, b) => a.dateISO.localeCompare(b.dateISO))
+
+  const sourceCounts = review.transactions.reduce((map, tx) => {
+    map[tx.sourceName] = (map[tx.sourceName] || 0) + 1
+    return map
+  }, {})
+  const payloadFiles = Array.isArray(payload.files) ? payload.files : []
+  const fileSummaries = payloadFiles.length ? payloadFiles : files.map(file => ({ name: file.name }))
+  const existingFileIds = new Set(review.files.map(file => file.id))
+
+  fileSummaries.forEach(file => {
+    const name = String(file.name || file.sourceName || "Statement")
+    const id = String(file.id || makeReviewId(name, importedAt))
+    if (existingFileIds.has(id)) return
+    review.files.push({
+      id,
+      name,
+      transactionCount: Number(file.transactionCount) || Number(sourceCounts[name]) || 0,
+      importedAt
+    })
+    existingFileIds.add(id)
+  })
+
+  cleanupReviewSelections()
+  saveReviewState()
+  return added
+}
+
+function reviewRowsForStoreKey(key) {
+  const { category, merchant } = parseReviewStoreKey(key)
+  return getReview().transactions.filter(tx => tx.category === category && tx.merchant === merchant)
+}
+
+function reviewTransactionById(id) {
+  return getReview().transactions.find(tx => tx.id === id)
+}
+
+function toggleSetValue(set, value) {
+  if (!value) return false
+  if (set.has(value)) {
+    set.delete(value)
+    return false
+  }
+  set.add(value)
+  return true
+}
+
+function removeReviewStoreOverrides(category) {
+  const review = getReview()
+  const txIds = new Set(review.transactions.filter(tx => tx.category === category).map(tx => tx.id))
+  review.selectedStores = review.selectedStores.filter(key => parseReviewStoreKey(key).category !== category)
+  review.excludedStores = review.excludedStores.filter(key => parseReviewStoreKey(key).category !== category)
+  review.selectedTransactions = review.selectedTransactions.filter(id => !txIds.has(id))
+  review.excludedTransactions = review.excludedTransactions.filter(id => !txIds.has(id))
+}
+
+function removeReviewTransactionOverridesForStore(key) {
+  const ids = new Set(reviewRowsForStoreKey(key).map(tx => tx.id))
+  const review = getReview()
+  review.selectedTransactions = review.selectedTransactions.filter(id => !ids.has(id))
+  review.excludedTransactions = review.excludedTransactions.filter(id => !ids.has(id))
+}
+
+function cleanupReviewSelections() {
+  const review = getReview()
+  const validCategories = new Set(review.transactions.map(tx => tx.category))
+  const validStores = new Set(review.transactions.map(tx => reviewStoreKey(tx.category, tx.merchant)))
+  const validTx = new Set(review.transactions.map(tx => tx.id))
+
+  review.selectedCategories = review.selectedCategories.filter(value => validCategories.has(value))
+  review.selectedStores = review.selectedStores.filter(value => validStores.has(value))
+  review.excludedStores = review.excludedStores.filter(value => validStores.has(value))
+  review.expandedCategories = review.expandedCategories.filter(value => validCategories.has(value))
+  review.expandedStores = review.expandedStores.filter(value => validStores.has(value))
+  review.selectedTransactions = review.selectedTransactions.filter(value => validTx.has(value))
+  review.excludedTransactions = review.excludedTransactions.filter(value => validTx.has(value))
+}
+
+function setReviewPeriod(value) {
+  const review = getReview()
+  const valid = value === "average" || (String(value || "").startsWith("month:") && reviewMonths().includes(String(value).replace("month:", "")))
+  review.activePeriod = valid ? String(value) : "average"
+  saveReviewState()
+  render()
+  haptic("light")
+}
+
+function toggleReviewCategory(category) {
+  if (!category) return
+  const set = reviewSelectedSet("selectedCategories")
+  toggleSetValue(set, category)
+  setReviewArray("selectedCategories", set)
+  removeReviewStoreOverrides(category)
+  cleanupReviewSelections()
+  saveReviewState()
+  render()
+  haptic("light")
+}
+
+function toggleReviewCategoryDetails(category) {
+  if (!category) return
+  const set = reviewSelectedSet("expandedCategories")
+  toggleSetValue(set, category)
+  setReviewArray("expandedCategories", set)
+  saveReviewState()
+  render()
+  haptic("light")
+}
+
+function toggleReviewStore(key) {
+  if (!key) return
+  const { category } = parseReviewStoreKey(key)
+  const review = getReview()
+  const categorySelected = review.selectedCategories.includes(category)
+  const selectedStores = reviewSelectedSet("selectedStores")
+  const excludedStores = reviewSelectedSet("excludedStores")
+
+  if (categorySelected) toggleSetValue(excludedStores, key)
+  else toggleSetValue(selectedStores, key)
+
+  setReviewArray("selectedStores", selectedStores)
+  setReviewArray("excludedStores", excludedStores)
+  removeReviewTransactionOverridesForStore(key)
+  cleanupReviewSelections()
+  saveReviewState()
+  render()
+  haptic("light")
+}
+
+function toggleReviewStoreDetails(key) {
+  if (!key) return
+  const set = reviewSelectedSet("expandedStores")
+  toggleSetValue(set, key)
+  setReviewArray("expandedStores", set)
+  saveReviewState()
+  render()
+  haptic("light")
+}
+
+function toggleReviewTransaction(id) {
+  const tx = reviewTransactionById(id)
+  if (!tx) return
+
+  const review = getReview()
+  const storeKey = reviewStoreKey(tx.category, tx.merchant)
+  const categorySelected = review.selectedCategories.includes(tx.category)
+  const storeSelected = review.selectedStores.includes(storeKey)
+  const storeExcluded = review.excludedStores.includes(storeKey)
+  const selectedTx = reviewSelectedSet("selectedTransactions")
+  const excludedTx = reviewSelectedSet("excludedTransactions")
+
+  if ((categorySelected && !storeExcluded) || storeSelected) {
+    toggleSetValue(excludedTx, tx.id)
+    selectedTx.delete(tx.id)
+  } else {
+    toggleSetValue(selectedTx, tx.id)
+    excludedTx.delete(tx.id)
+  }
+
+  setReviewArray("selectedTransactions", selectedTx)
+  setReviewArray("excludedTransactions", excludedTx)
+  cleanupReviewSelections()
+  saveReviewState()
+  render()
+  haptic("light")
+}
+
+function clearReviewSelection() {
+  const review = getReview()
+  review.selectedCategories = []
+  review.selectedStores = []
+  review.selectedTransactions = []
+  review.excludedStores = []
+  review.excludedTransactions = []
+  saveReviewState()
+  render()
+  haptic("medium")
+  toast("Selection cleared")
+}
+
+function clearReview() {
+  if (!confirm("Clear this statement review? Your budgets and expenses will stay untouched.")) return
+  app.data._settings.review = ensureReviewShape({})
+  app.reviewStatus = ""
+  saveData(app.data)
+  render()
+  haptic("warning")
+  toast("Review cleared")
+}
+
+function saveReviewPool() {
+  const context = reviewContext()
+  const stable = reviewStableAmount(context)
+  const income = Number(app.drafts.method.monthlyIncome) || 0
+
+  if (income <= 0 || stable <= 0) {
+    toast("Add income and select stable expenses")
+    return
+  }
+
+  const pool = Math.max(0, roundMoney(income - stable))
+  const method = getMethod()
+  method.monthlyIncome = income
+  method.predictableExpensesTotal = stable
+  method.intentionalPool = pool
+  method.completedAt = Date.now()
+  method.introSeenAt = Number(method.introSeenAt) || Date.now()
+  getReview().stableMonthlyAmount = stable
+  syncMethodDraft()
+  saveReviewState()
+  render()
+  haptic("success")
+  toast(`Pool saved: ${fmt(pool)} available`)
 }
 
 function closeModal(shouldRender = true) {
