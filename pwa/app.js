@@ -1,5 +1,5 @@
 const STORAGE_KEY = "budget_tracker_pwa_v1"
-const APP_VERSION = "23"
+const APP_VERSION = "24"
 const ROLLOVER_START_KEY = "2026-4"
 const REVIEW_REQUIRED_MONTHS = 4
 const REVIEW_HANDOFF_URL = `https://ezratawachi.github.io/scriptable-budget-tracker/pwa/?v=${APP_VERSION}&review=1`
@@ -46,9 +46,14 @@ const app = {
   installCoachNext: null,
   reviewBusy: false,
   reviewStatus: "",
+  reviewJustAnalyzed: false,
   newPresetCat: null,
   newWishCat: null,
   installPrompt: null,
+  confirmConfig: null,
+  pendingUndos: [],
+  theme: "auto",
+  methodJustSaved: false,
   cloudUser: null,
   cloudEmail: "",
   cloudReady: false,
@@ -1193,17 +1198,184 @@ function icon(name, label = "", className = "") {
   return `<span class="ui-icon ${className}" ${aria}><svg viewBox="0 0 24 24" focusable="false">${body}</svg></span>`
 }
 
+const HAPTIC_PATTERNS = {
+  tap: 6,
+  light: 8,
+  medium: 14,
+  heavy: 22,
+  success: [10, 28, 10],
+  warning: [16, 36, 16],
+  error: [22, 48, 22, 48, 22],
+  selection: 4
+}
+
 function haptic(type = "light") {
   if (!("vibrate" in navigator)) return
+  const pattern = HAPTIC_PATTERNS[type] || HAPTIC_PATTERNS.light
+  try { navigator.vibrate(pattern) } catch (_) {}
+}
 
-  const patterns = {
-    light: 8,
-    medium: 14,
-    success: [10, 35, 10],
-    warning: [18, 40, 18]
+function confirmSheet(options = {}) {
+  const config = {
+    title: String(options.title || "Are you sure?"),
+    body: String(options.body || ""),
+    primaryLabel: String(options.primaryLabel || (options.destructive ? "Delete" : "Confirm")),
+    cancelLabel: String(options.cancelLabel || "Cancel"),
+    destructive: !!options.destructive,
+    onConfirm: typeof options.onConfirm === "function" ? options.onConfirm : () => {},
+    onCancel: typeof options.onCancel === "function" ? options.onCancel : null
   }
 
-  navigator.vibrate(patterns[type] || patterns.light)
+  app.confirmConfig = config
+  app.modal = "confirm"
+  haptic(config.destructive ? "warning" : "light")
+  renderModal()
+}
+
+function resolveConfirm(accepted) {
+  const config = app.confirmConfig
+  if (!config) return closeModal()
+
+  app.confirmConfig = null
+  app.modal = null
+  renderModal()
+
+  if (accepted) {
+    try { config.onConfirm() } catch (_) {}
+  } else if (config.onCancel) {
+    try { config.onCancel() } catch (_) {}
+  }
+}
+
+function renderConfirmModal() {
+  const config = app.confirmConfig
+  if (!config) return ""
+  const primaryClass = config.destructive ? "danger-btn" : "primary-btn"
+  return `
+    <div class="sheet confirm-sheet" role="alertdialog" aria-modal="true" aria-label="${attr(config.title)}">
+      <div class="confirm-head">
+        <div class="confirm-title">${esc(config.title)}</div>
+        ${config.body ? `<div class="confirm-body">${esc(config.body)}</div>` : ""}
+      </div>
+      <div class="confirm-actions">
+        <button class="secondary-btn" data-action="confirmNo">${esc(config.cancelLabel)}</button>
+        <button class="${primaryClass}" data-action="confirmYes" autofocus>${esc(config.primaryLabel)}</button>
+      </div>
+    </div>
+  `
+}
+
+function tickNumber(node, fromValue, toValue, options = {}) {
+  if (!node) return
+  const from = Number(fromValue) || 0
+  const to = Number(toValue) || 0
+  const duration = Number(options.duration) || 520
+  const formatter = typeof options.format === "function" ? options.format : v => fmt(v)
+
+  if (window.matchMedia && window.matchMedia("(prefers-reduced-motion:reduce)").matches) {
+    node.textContent = formatter(to)
+    return
+  }
+
+  const start = performance.now()
+  const delta = to - from
+  if (node.__tickToken) cancelAnimationFrame(node.__tickToken)
+
+  const step = now => {
+    const t = Math.min(1, (now - start) / duration)
+    const eased = 1 - Math.pow(1 - t, 3)
+    const current = from + delta * eased
+    node.textContent = formatter(current)
+    if (t < 1) {
+      node.__tickToken = requestAnimationFrame(step)
+    } else {
+      node.__tickToken = null
+    }
+  }
+
+  node.__tickToken = requestAnimationFrame(step)
+}
+
+let __undoToastTimer = null
+let __activeUndo = null
+
+function undoToast(message, onUndo, options = {}) {
+  if (!toastEl) return
+  const duration = Number(options.duration) || 5000
+
+  if (__activeUndo) {
+    try { __activeUndo.commit() } catch (_) {}
+  }
+
+  __activeUndo = {
+    commit: typeof options.onExpire === "function" ? options.onExpire : () => {}
+  }
+
+  toastEl.classList.add("show", "undo")
+  toastEl.innerHTML = `<span class="toast-text">${esc(message)}</span><button class="toast-undo" data-action="undoLast">Undo</button>`
+  toastEl.dataset.kind = "undo"
+
+  clearTimeout(__undoToastTimer)
+  __undoToastTimer = setTimeout(() => {
+    const commitFn = __activeUndo && __activeUndo.commit
+    __activeUndo = null
+    toastEl.classList.remove("show", "undo")
+    toastEl.removeAttribute("data-kind")
+    toastEl.textContent = ""
+    if (commitFn) {
+      try { commitFn() } catch (_) {}
+    }
+  }, duration)
+
+  toastEl.__undoCallback = () => {
+    clearTimeout(__undoToastTimer)
+    __activeUndo = null
+    toastEl.classList.remove("show", "undo")
+    toastEl.removeAttribute("data-kind")
+    toastEl.textContent = ""
+    if (typeof onUndo === "function") {
+      try { onUndo() } catch (_) {}
+    }
+    haptic("light")
+  }
+}
+
+function applyTheme(theme) {
+  const safe = ["auto", "light", "dark"].includes(theme) ? theme : "auto"
+  app.theme = safe
+  const root = document.documentElement
+  if (safe === "auto") root.removeAttribute("data-theme")
+  else root.setAttribute("data-theme", safe)
+  try { localStorage.setItem("budget_tracker_theme", safe) } catch (_) {}
+  const meta = document.querySelector('meta[name="theme-color"]')
+  if (meta) {
+    const effectiveDark = safe === "dark" || (safe === "auto" && window.matchMedia && window.matchMedia("(prefers-color-scheme:dark)").matches)
+    meta.setAttribute("content", effectiveDark ? "#0E1117" : "#F6F8FA")
+  }
+}
+
+function cycleTheme() {
+  const order = ["auto", "light", "dark"]
+  const next = order[(order.indexOf(app.theme) + 1) % order.length]
+  applyTheme(next)
+  haptic("selection")
+  toast(`Theme: ${next}`)
+  render()
+}
+
+try {
+  const stored = localStorage.getItem("budget_tracker_theme")
+  if (stored) applyTheme(stored)
+  else applyTheme("auto")
+} catch (_) { applyTheme("auto") }
+
+if (window.matchMedia) {
+  const mq = window.matchMedia("(prefers-color-scheme:dark)")
+  const onChange = () => {
+    if (app.theme === "auto") applyTheme("auto")
+  }
+  if (mq.addEventListener) mq.addEventListener("change", onChange)
+  else if (mq.addListener) mq.addListener(onChange)
 }
 
 function secondaryBackView(defaultView = "account") {
@@ -1272,6 +1444,25 @@ function filteredIconGroups() {
     .filter(([, choices]) => choices.length)
 }
 
+function emptyState(options = {}) {
+  const iconName = options.icon || "wallet"
+  const title = String(options.title || "")
+  const body = String(options.body || "")
+  const variant = options.variant ? ` ${attr(options.variant)}` : ""
+  const action = options.action
+  const actionMarkup = action
+    ? `<button class="${action.style || "primary-btn"} empty-action" data-action="${attr(action.action || "go")}" ${action.view ? `data-view="${attr(action.view)}"` : ""}>${icon(action.icon || "add")} ${esc(action.label)}</button>`
+    : ""
+  return `
+    <div class="empty${variant}">
+      <div class="empty-icon">${icon(iconName, "", "empty-glyph")}</div>
+      <div class="empty-title">${esc(title)}</div>
+      ${body ? `<div class="empty-body">${esc(body)}</div>` : ""}
+      ${actionMarkup}
+    </div>
+  `
+}
+
 function header(title, subtitle, actions = "") {
   return `
     <div class="header">
@@ -1282,6 +1473,11 @@ function header(title, subtitle, actions = "") {
       <div class="actions">${actions}</div>
     </div>
   `
+}
+
+function quickFAB() {
+  if (!app.state || !app.state.budgets || !app.state.budgets.length) return ""
+  return `<button class="fab" data-action="openQuickAdd" aria-label="Log a leak" title="Log a leak">${icon("add")}</button>`
 }
 
 function nav() {
@@ -1323,11 +1519,13 @@ function renderHome() {
   const cloudButton = `<button class="top-btn icon-btn cloud-btn ${app.cloudUser ? "online" : ""} ${app.cloudBusy ? "syncing" : ""}" title="${cloudTitle}" aria-label="${cloudTitle}" data-action="go" data-view="account">${icon("cloud")}</button>`
   const budgetContent = app.state.budgets.length
     ? app.state.budgets.map(renderBudgetCard).join("")
-    : `<div class="empty budget-empty">
-        <div class="empty-title">No leak budgets yet</div>
-        <div class="row-meta">Create only the categories that feel invisible or uncontrolled.</div>
-        <button class="secondary-btn empty-action" data-action="go" data-view="cats">${icon("add")} Create Leak Budget</button>
-      </div>`
+    : emptyState({
+        icon: "grid",
+        title: "No leak budgets",
+        body: "Start with what tends to slip.",
+        variant: "budget-empty",
+        action: { action: "go", view: "cats", label: "New budget", style: "primary-btn" }
+      })
 
   return `
     <section class="view">
@@ -1336,9 +1534,9 @@ function renderHome() {
         ${installButton}
       `)}
 
-      <div class="hero">
+      <div class="hero ${app.methodJustSaved ? "just-saved" : ""}">
         <div class="hero-label">${left < 0 ? "Over budget" : "Available"}</div>
-        <div class="hero-amount" style="color:${left < 0 ? "var(--red)" : "var(--txt)"}">${money0(Math.abs(left))}</div>
+        <div class="hero-amount" data-value="${Math.abs(left)}" style="color:${left < 0 ? "var(--red)" : "var(--txt)"}">${money0(Math.abs(left))}</div>
         <div class="hero-sub">${fmt(totalSpent)} spent of ${fmt(totalBudget)}${rollText}</div>
         <div class="status-pill" style="color:${health.color};background:${health.bg};border-color:${health.border}">${esc(health.text)}</div>
 
@@ -1368,6 +1566,7 @@ function renderHome() {
         </div>
       </div>
 
+      ${quickFAB()}
       ${nav()}
     </section>
   `
@@ -1479,9 +1678,36 @@ function renderPresetButtons() {
 
 function renderLog() {
   const entries = [...(app.state.entries || [])].reverse()
-  const content = entries.length
-    ? entries.map(renderLogItem).join("")
-    : `<div class="empty"><div class="empty-icon">${icon("activity")}</div><div class="empty-title">No activity yet</div></div>`
+  let content
+  if (!entries.length) {
+    content = emptyState({
+      icon: "activity",
+      title: "Nothing logged this month",
+      body: "Tap + when something leaks.",
+      action: { action: "openQuickAdd", label: "Log a leak", style: "primary-btn" }
+    })
+  } else {
+    const groups = []
+    let current = null
+    for (const entry of entries) {
+      const date = entry.date || "—"
+      if (!current || current.date !== date) {
+        current = { date, total: 0, entries: [] }
+        groups.push(current)
+      }
+      current.entries.push(entry)
+      current.total += Number(entry.amt) || 0
+    }
+    content = groups.map(g => `
+      <section class="log-day">
+        <div class="log-day-header">
+          <span class="log-day-date">${esc(g.date)}</span>
+          <span class="log-day-total">${fmt(g.total)}</span>
+        </div>
+        ${g.entries.map(renderLogItem).join("")}
+      </section>
+    `).join("")
+  }
 
   return `
     <section class="view">
@@ -1491,6 +1717,7 @@ function renderLog() {
       <div class="scroll">
         <div class="item-list">${content}</div>
       </div>
+      ${quickFAB()}
       ${nav()}
     </section>
   `
@@ -1592,7 +1819,11 @@ function renderPresets() {
       </div>
       <div class="scroll">
         <div class="item-list">
-          ${app.state.presets.length ? app.state.presets.map(renderPresetCard).join("") : `<div class="empty"><div class="empty-icon">⚡</div><div class="empty-title">No presets yet</div></div>`}
+          ${app.state.presets.length ? app.state.presets.map(renderPresetCard).join("") : emptyState({
+            icon: "settings",
+            title: "No presets",
+            body: "Save the things you log most."
+          })}
         </div>
       </div>
     </section>
@@ -1640,7 +1871,11 @@ function renderWishes() {
       </div>
       <div class="scroll">
         <div class="item-list">
-          ${app.state.wishes.length ? app.state.wishes.map(renderWishCard).join("") : `<div class="empty"><div class="empty-icon">✨</div><div class="empty-title">Your wishlist is empty</div></div>`}
+          ${app.state.wishes.length ? app.state.wishes.map(renderWishCard).join("") : emptyState({
+            icon: "heart",
+            title: "Wishlist is empty",
+            body: "Add something you're saving for."
+          })}
         </div>
       </div>
     </section>
@@ -1671,6 +1906,20 @@ function renderReview() {
   const visibleTotal = reviewTotal(context.rows, context.divisor)
   const income = Number(app.drafts.method.monthlyIncome) || Number(getMethod().monthlyIncome) || 0
   const available = roundMoney(income - stable)
+  const busy = !!app.reviewBusy
+
+  const statusText = app.reviewStatus || (hasTransactions
+    ? "Raw files are not stored after processing."
+    : "CSV, TXT, and Excel first. We need 4 detected months before saving your pool.")
+
+  let body
+  if (busy && !hasTransactions) {
+    body = renderReviewSkeleton()
+  } else if (hasTransactions) {
+    body = renderReviewWorkspace(context, { stable, visibleTotal, income, available })
+  } else {
+    body = renderReviewEmpty()
+  }
 
   return `
     <section class="view">
@@ -1683,29 +1932,73 @@ function renderReview() {
       <div class="scroll review-scroll">
         <div class="review-hero">
           <div class="section-label">Find your pool</div>
-          <div class="review-title">Discover what you do not need to track.</div>
+          <div class="review-title">Discover what you don't need to track.</div>
           <p>Upload 4 months of statements. One month can lie. Four months starts to show your real rhythm.</p>
           <div class="review-actions">
-            <button class="primary-btn" data-action="pickStatements" ${app.reviewBusy ? "disabled" : ""}>${icon("upload")} Upload Statements</button>
-            ${hasTransactions ? `<button class="secondary-btn" data-action="clearReview">${icon("trash")} Clear Review</button>` : ""}
+            <button class="primary-btn" data-action="pickStatements" ${busy ? "disabled" : ""}>${icon("upload")} ${busy ? "Analyzing…" : "Upload Statements"}</button>
+            ${hasTransactions && !busy ? `<button class="secondary-btn" data-action="clearReview">${icon("trash")} Clear Review</button>` : ""}
           </div>
-          <div class="review-status">${esc(app.reviewStatus || (hasTransactions ? "Raw files are not stored after processing." : "CSV, TXT, and Excel first. We need 4 detected months before saving your pool."))}</div>
+          <div class="review-status ${busy ? "busy" : ""}">
+            ${busy ? `<span class="review-status-dot"></span>` : ""}
+            <span>${esc(statusText)}</span>
+          </div>
         </div>
 
         ${renderDesktopHandoffCard()}
-        ${hasTransactions ? renderReviewWorkspace(context, { stable, visibleTotal, income, available }) : renderReviewEmpty()}
+        ${body}
       </div>
     </section>
   `
 }
 
-function renderReviewEmpty() {
+function renderReviewSkeleton() {
+  const groups = [
+    { label: "Groceries", rows: 3 },
+    { label: "Subscriptions", rows: 4 },
+    { label: "Transport", rows: 2 }
+  ]
+
   return `
-    <div class="empty review-empty">
-      <div class="empty-title">No statement review yet</div>
-      <div class="row-meta">This is where you will study your real spending before creating leak budgets.</div>
+    <div class="review-skeleton" role="status" aria-live="polite" aria-label="Analyzing statements">
+      <div class="skel-pool-card">
+        <div class="skel-line skel-pool-label"></div>
+        <div class="skel-line skel-pool-amount"></div>
+        <div class="skel-line skel-pool-copy"></div>
+      </div>
+      ${groups.map((g, i) => `
+        <article class="skel-group" style="animation-delay:${i * 80}ms">
+          <div class="skel-group-head">
+            <div class="skel-dot"></div>
+            <div class="skel-group-body">
+              <div class="skel-line skel-w-40"></div>
+              <div class="skel-line skel-w-25"></div>
+            </div>
+            <div class="skel-group-side">
+              <div class="skel-line skel-w-60"></div>
+              <div class="skel-line skel-w-30"></div>
+            </div>
+          </div>
+          <div class="skel-bar"></div>
+          ${Array.from({ length: g.rows }, (_, j) => `
+            <div class="skel-row" style="animation-delay:${i * 80 + j * 40}ms">
+              <div class="skel-line skel-w-50"></div>
+              <div class="skel-line skel-w-20"></div>
+            </div>
+          `).join("")}
+        </article>
+      `).join("")}
     </div>
   `
+}
+
+function renderReviewEmpty() {
+  return emptyState({
+    icon: "upload",
+    title: "No statements reviewed",
+    body: "Drop in 4 months to find your pool.",
+    variant: "review-empty",
+    action: { action: "pickStatements", label: "Upload statements", icon: "upload", style: "primary-btn" }
+  })
 }
 
 function renderDesktopHandoffCard() {
@@ -1765,7 +2058,7 @@ function renderReviewWorkspace(context, totals) {
     <div class="review-pool-card">
       <div>
         <div class="section-label">Available for leak budgets</div>
-        <div class="review-pool-title" id="review-pool-amount">${totals.income > 0 ? fmt(Math.max(0, totals.available)) : "Add income"}</div>
+        <div class="review-pool-title" id="review-pool-amount" data-value="${totals.income > 0 ? Math.max(0, totals.available) : 0}">${totals.income > 0 ? fmt(Math.max(0, totals.available)) : "Add income"}</div>
         <p id="review-pool-copy">${poolCopy}</p>
         <p class="review-pool-note" id="review-pool-note">${esc(poolNote)}</p>
       </div>
@@ -1789,7 +2082,7 @@ function renderReviewWorkspace(context, totals) {
       <button class="text-btn" data-action="clearReviewSelection">Clear</button>
     </div>
 
-    <div class="review-category-list">
+    <div class="review-category-list ${app.reviewJustAnalyzed ? "just-analyzed" : ""}">
       ${groups.length ? groups.map((group, index) => renderReviewGroup(group, totals.visibleTotal, index, context)).join("") : `<div class="empty compact-empty"><div class="empty-title">No transactions for this period</div></div>`}
     </div>
 
@@ -1876,13 +2169,17 @@ function renderReviewStore(store, context) {
 
 function renderReviewTransaction(tx, context) {
   const mode = reviewTransactionMode(tx)
+  const merchantClean = String(tx.merchant || "").trim()
+  const rawDescription = String(tx.originalDescription || "").trim()
+  const showRaw = rawDescription && rawDescription.toLowerCase() !== merchantClean.toLowerCase()
   return `
     <button class="review-tx ${mode}" data-action="toggleReviewTransaction" data-id="${attr(tx.id)}">
-      <span>
-        <strong class="clamp-1">${esc(tx.merchant)}</strong>
-        <small class="clamp-2">${esc(tx.dateISO)} · ${esc(tx.originalDescription)} · ${esc(tx.sourceName)}</small>
+      <span class="review-tx-copy">
+        <strong class="clamp-1">${esc(merchantClean)}</strong>
+        ${showRaw ? `<span class="review-tx-raw clamp-1">${esc(rawDescription)}</span>` : ""}
+        <small class="clamp-1">${esc(tx.dateISO)} · ${esc(tx.sourceName)}</small>
       </span>
-      <span>${fmt(reviewAmount(tx.amount, context.divisor))}</span>
+      <span class="review-tx-amt">${fmt(reviewAmount(tx.amount, context.divisor))}</span>
     </button>
   `
 }
@@ -2361,6 +2658,8 @@ function renderAccount() {
           </div>
         </div>
 
+        ${renderThemePanel()}
+
         ${renderBackupPanel()}
 
         <div class="account-panel">
@@ -2378,6 +2677,40 @@ function renderAccount() {
       ${nav()}
     </section>
   `
+}
+
+function renderThemePanel() {
+  const themes = [
+    { key: "auto", label: "Auto", desc: "Match system" },
+    { key: "light", label: "Light", desc: "Always light" },
+    { key: "dark", label: "Dark", desc: "Always dark" }
+  ]
+  return `
+    <div class="account-panel">
+      <div class="panel-head">
+        <div>
+          <div class="section-label">Appearance</div>
+          <div class="panel-title">Theme</div>
+        </div>
+        ${icon("settings", "", "panel-icon")}
+      </div>
+      <div class="theme-segments" role="group" aria-label="Theme">
+        ${themes.map(t => `
+          <button class="theme-chip ${app.theme === t.key ? "active" : ""}" data-action="setTheme" data-value="${attr(t.key)}" aria-pressed="${app.theme === t.key ? "true" : "false"}">
+            <strong>${esc(t.label)}</strong>
+            <small>${esc(t.desc)}</small>
+          </button>
+        `).join("")}
+      </div>
+    </div>
+  `
+}
+
+function setTheme(theme) {
+  if (theme === app.theme) return
+  applyTheme(theme)
+  haptic("selection")
+  render()
 }
 
 function renderModal() {
@@ -2403,6 +2736,94 @@ function renderModal() {
   if (app.modal === "installCoach") modalEl.innerHTML = renderInstallCoachModal()
   if (app.modal === "method") modalEl.innerHTML = renderMethodModal()
   if (app.modal === "iconPicker") modalEl.innerHTML = renderIconPickerModal()
+  if (app.modal === "confirm") modalEl.innerHTML = renderConfirmModal()
+  if (app.modal === "quickAdd") modalEl.innerHTML = renderQuickAddModal()
+}
+
+function renderQuickAddModal() {
+  const budgets = app.state.budgets || []
+  const selected = app.selectedCat ? categoryById(app.selectedCat) : null
+  const amountValue = app.drafts.add.amt
+  const displayAmt = amountValue ? fmt(Number(amountValue) || 0) : "$0.00"
+
+  return `
+    <div class="sheet quick-sheet" role="dialog" aria-modal="true" aria-label="Log a leak">
+      <div class="sheet-top">
+        <div class="sheet-title">Log a leak</div>
+        <button class="sheet-close" aria-label="Close" data-action="closeModal">${icon("close")}</button>
+      </div>
+
+      <div class="quick-amount-display ${amountValue ? "filled" : ""}" data-value="${attr(amountValue || "0")}">${esc(displayAmt)}</div>
+
+      <input class="field quick-amount-input" id="add-amt" type="number" inputmode="decimal" placeholder="$0.00" value="${attr(amountValue)}" autocomplete="off">
+
+      <div class="section-label quick-section-label">Category</div>
+      <div class="quick-cat-row">
+        ${budgets.map(cat => {
+          const color = cssColor(cat.color)
+          const active = selected && selected.id === cat.id
+          return `
+            <button class="quick-cat ${active ? "active" : ""}" data-action="chooseQuickCat" data-id="${attr(cat.id)}" style="--cat:${color};--cat-soft:${color}1A">
+              <span class="quick-cat-emoji">${esc(cat.icon)}</span>
+              <span class="quick-cat-label clamp-1">${esc(cat.label)}</span>
+            </button>
+          `
+        }).join("")}
+      </div>
+
+      <input class="field quick-desc" id="add-desc" type="text" placeholder="${selected ? `What was the ${esc(selected.label).toLowerCase()} for?` : "What was it?"}" value="${attr(app.drafts.add.desc)}" autocomplete="off">
+
+      <button class="primary-btn quick-save" id="save-expense" data-action="saveQuickExpense" ${canSaveExpense() ? "" : "disabled"}>${icon("check")} Save</button>
+    </div>
+  `
+}
+
+function openQuickAdd() {
+  haptic("light")
+  app.modal = "quickAdd"
+  renderModal()
+  setTimeout(() => {
+    const amt = document.getElementById("add-amt")
+    if (amt) amt.focus()
+  }, 280)
+}
+
+function chooseQuickCat(id) {
+  if (!categoryById(id)) return
+  haptic("selection")
+  app.selectedCat = id
+  modalEl.querySelectorAll(".quick-cat").forEach(el => {
+    el.classList.toggle("active", el.dataset.id === id)
+  })
+  const desc = document.getElementById("add-desc")
+  if (desc) {
+    const cat = categoryById(id)
+    desc.placeholder = cat ? `What was the ${cat.label.toLowerCase()} for?` : "What was it?"
+  }
+  updateButtonState("save-expense", canSaveExpense())
+}
+
+function saveQuickExpense() {
+  const amount = Number(app.drafts.add.amt)
+  const cat = categoryById(app.selectedCat)
+  if (!cat || amount <= 0) return
+
+  if (!Array.isArray(app.data[app.key])) app.data[app.key] = []
+  app.data[app.key].push({
+    id: Date.now() + Math.floor(Math.random() * 1000),
+    cat: cat.id,
+    amt: amount,
+    desc: app.drafts.add.desc.trim() || cat.label,
+    date: todayLabel()
+  })
+
+  app.drafts.add = { amt: "", desc: "" }
+  app.selectedCat = null
+  closeModal(false)
+  saveData(app.data)
+  render()
+  haptic("success")
+  toast("Logged")
 }
 
 function renderCatPickerModal() {
@@ -2820,6 +3241,13 @@ function updateIconPickerResults() {
 function render() {
   syncState()
 
+  const previousHero = (() => {
+    const el = appEl.querySelector(".hero-amount")
+    if (!el) return null
+    const value = Number(el.dataset.value)
+    return Number.isFinite(value) ? value : null
+  })()
+
   const views = {
     home: renderHome,
     add: renderAdd,
@@ -2833,6 +3261,16 @@ function render() {
 
   appEl.innerHTML = (views[app.view] || renderHome)()
   renderModal()
+
+  if (app.view === "home") {
+    const heroEl = appEl.querySelector(".hero-amount")
+    if (heroEl) {
+      const newValue = Number(heroEl.dataset.value) || 0
+      if (previousHero !== null && Math.abs(previousHero - newValue) > 0.005) {
+        tickNumber(heroEl, previousHero, newValue, { format: v => money0(v) })
+      }
+    }
+  }
 }
 
 function canSaveExpense() {
@@ -2866,6 +3304,12 @@ function handleInput(event) {
   if (target.id === "add-amt") {
     app.drafts.add.amt = target.value
     updateButtonState("save-expense", canSaveExpense())
+    const display = document.querySelector(".quick-amount-display")
+    if (display) {
+      const val = Number(target.value) || 0
+      display.textContent = val > 0 ? fmt(val) : "$0.00"
+      display.classList.toggle("filled", val > 0)
+    }
   }
 
   if (target.id === "add-desc") app.drafts.add.desc = target.value
@@ -2944,6 +3388,7 @@ function handleClick(event) {
       if (app.modal === "methodIntro") dismissMethodIntro()
       else if (app.modal === "installCoach") continueInstallCoach()
       else if (app.modal === "method") dismissMethod()
+      else if (app.modal === "confirm") resolveConfirm(false)
       else closeModal()
     }
     return
@@ -3025,12 +3470,30 @@ function handleClick(event) {
   if (action === "cloudLogin") sendEmailCode()
   if (action === "cloudVerify") verifyEmailCode()
   if (action === "cloudPush") pushCloudData()
-  if (action === "cloudPull" && confirm("This will replace this local copy with your saved backup.")) pullCloudData()
+  if (action === "cloudPull") {
+    confirmSheet({
+      title: "Restore from cloud backup?",
+      body: "This replaces this device's data with what's saved on the server.",
+      primaryLabel: "Restore",
+      destructive: true,
+      onConfirm: pullCloudData
+    })
+  }
   if (action === "cloudSignOut") signOutCloud()
   if (action === "install") installPWA()
   if (action === "openIconPicker") openIconPicker(targetName)
   if (action === "chooseIcon") chooseIcon(value)
   if (action === "closeModal") closeModal()
+  if (action === "confirmYes") resolveConfirm(true)
+  if (action === "confirmNo") resolveConfirm(false)
+  if (action === "undoLast") {
+    if (toastEl.__undoCallback) toastEl.__undoCallback()
+  }
+  if (action === "cycleTheme") cycleTheme()
+  if (action === "setTheme") setTheme(value)
+  if (action === "openQuickAdd") openQuickAdd()
+  if (action === "chooseQuickCat") chooseQuickCat(id)
+  if (action === "saveQuickExpense") saveQuickExpense()
 }
 
 function go(view) {
@@ -3232,9 +3695,11 @@ function saveMethod() {
   syncMethodDraft()
   closeModal(false)
   saveData(app.data)
+  app.methodJustSaved = true
+  setTimeout(() => { app.methodJustSaved = false }, 1600)
   render()
   haptic("success")
-  toast("Pool saved")
+  toast("Pool ready")
 }
 
 function updateReviewPoolPreview() {
@@ -3245,7 +3710,20 @@ function updateReviewPoolPreview() {
   const copy = document.getElementById("review-pool-copy")
   const button = document.getElementById("save-review-pool")
 
-  if (title) title.textContent = income > 0 ? fmt(available) : "Add income"
+  if (title) {
+    if (income > 0) {
+      const prev = Number(title.dataset.value)
+      title.dataset.value = String(available)
+      if (Number.isFinite(prev) && Math.abs(prev - available) > 0.005) {
+        tickNumber(title, prev, available, { format: v => fmt(v), duration: 420 })
+      } else {
+        title.textContent = fmt(available)
+      }
+    } else {
+      title.dataset.value = "0"
+      title.textContent = "Add income"
+    }
+  }
   if (copy) copy.textContent = reviewPoolCopy(income, stable)
   updateButtonState("save-review-pool", canSaveReviewPool(income, stable))
   if (button) {
@@ -3359,6 +3837,10 @@ async function analyzeStatementFiles(files) {
       : "No new transactions found. Try another statement or format."
     haptic(added ? "success" : "medium")
     toast(added ? "Statements analyzed" : "No new transactions")
+    if (added) {
+      app.reviewJustAnalyzed = true
+      setTimeout(() => { app.reviewJustAnalyzed = false }, 900)
+    }
   } catch (error) {
     const message = reviewErrorMessage(error)
     app.reviewStatus = message
@@ -3573,13 +4055,20 @@ function clearReviewSelection(anchor) {
 }
 
 function clearReview() {
-  if (!confirm("Clear this statement review? Your budgets and expenses will stay untouched.")) return
-  app.data._settings.review = ensureReviewShape({})
-  app.reviewStatus = ""
-  saveData(app.data)
-  render()
-  haptic("warning")
-  toast("Review cleared")
+  confirmSheet({
+    title: "Clear statement review?",
+    body: "Your budgets and expenses stay untouched. The uploaded data is forgotten.",
+    primaryLabel: "Clear",
+    destructive: true,
+    onConfirm: () => {
+      app.data._settings.review = ensureReviewShape({})
+      app.reviewStatus = ""
+      saveData(app.data)
+      render()
+      haptic("warning")
+      toast("Review cleared")
+    }
+  })
 }
 
 function saveReviewPool() {
@@ -3625,6 +4114,7 @@ function closeModal(shouldRender = true) {
   }
 
   app.modal = null
+  app.confirmConfig = null
   if (previousModal === "methodIntro") app.methodIntroMode = "firstRun"
   if (previousModal === "installCoach") app.installCoachNext = null
   app.editingBudgetId = null
@@ -3807,9 +4297,13 @@ function deleteEditingBudget() {
   const id = app.editingBudgetId
   const budget = rawCategoryById(id)
   if (!budget) return
-  if (!confirm(`Delete ${budget.label}? Its expenses, presets, and wishes will also be deleted.`)) return
-  closeModal(false)
-  deleteCategory(id, { confirmed: true })
+  confirmSheet({
+    title: `Delete ${budget.label}?`,
+    body: "Its expenses, presets, and wishes will also be deleted.",
+    primaryLabel: "Delete",
+    destructive: true,
+    onConfirm: () => deleteCategory(id, { confirmed: true })
+  })
 }
 
 function deleteCategory(id, options = {}) {
@@ -3820,15 +4314,33 @@ function deleteCategory(id, options = {}) {
 
   const cat = rawCategoryById(id)
   if (!cat) return
-  if (!options.confirmed && !confirm(`Delete ${cat.label}? Its expenses, presets, and wishes will also be deleted.`)) return
 
-  app.data._settings.budgets = app.data._settings.budgets.filter(b => b.id !== id)
+  if (!options.confirmed) {
+    confirmSheet({
+      title: `Delete ${cat.label}?`,
+      body: "Its expenses, presets, and wishes will also be deleted.",
+      primaryLabel: "Delete",
+      destructive: true,
+      onConfirm: () => deleteCategory(id, { confirmed: true })
+    })
+    return
+  }
+
+  const snapshot = {
+    budget: clone(cat),
+    presets: app.data._settings.presets.filter(p => p.cat === id).map(clone),
+    wishes: app.data._settings.wishes.filter(w => w.cat === id).map(clone),
+    monthEntries: {}
+  }
   Object.keys(app.data).forEach(key => {
     if (key === "_settings" || !Array.isArray(app.data[key])) return
+    const removed = app.data[key].filter(entry => entry.cat === id)
+    if (removed.length) snapshot.monthEntries[key] = removed.map(clone)
     app.data[key] = app.data[key].filter(entry => entry.cat !== id)
   })
-  app.data._settings.presets = app.data._settings.presets.filter(preset => preset.cat !== id)
-  app.data._settings.wishes = app.data._settings.wishes.filter(wish => wish.cat !== id)
+  app.data._settings.budgets = app.data._settings.budgets.filter(b => b.id !== id)
+  app.data._settings.presets = app.data._settings.presets.filter(p => p.cat !== id)
+  app.data._settings.wishes = app.data._settings.wishes.filter(w => w.cat !== id)
   if (app.selectedCat === id) app.selectedCat = null
   if (app.newPresetCat === id) app.newPresetCat = null
   if (app.newWishCat === id) app.newWishCat = null
@@ -3836,7 +4348,18 @@ function deleteCategory(id, options = {}) {
   saveData(app.data)
   render()
   haptic("warning")
-  toast("Budget deleted")
+  undoToast(`Deleted ${snapshot.budget.label}`, () => {
+    app.data._settings.budgets.push(snapshot.budget)
+    snapshot.presets.forEach(p => app.data._settings.presets.push(p))
+    snapshot.wishes.forEach(w => app.data._settings.wishes.push(w))
+    Object.entries(snapshot.monthEntries).forEach(([key, entries]) => {
+      if (!Array.isArray(app.data[key])) app.data[key] = []
+      entries.forEach(e => app.data[key].push(e))
+    })
+    saveData(app.data)
+    render()
+    toast("Restored")
+  })
 }
 
 function pickPresetCat(id) {
@@ -3865,15 +4388,32 @@ function addPreset() {
 function deletePreset(id, options = {}) {
   const preset = presetById(id)
   if (!preset) return
-  if (!options.confirmed && !confirm(`Delete "${preset.desc}"?`)) return
 
+  if (!options.confirmed) {
+    confirmSheet({
+      title: `Delete "${preset.desc}"?`,
+      body: "This preset will be removed from your quick-add list.",
+      primaryLabel: "Delete",
+      destructive: true,
+      onConfirm: () => deletePreset(id, { confirmed: true })
+    })
+    return
+  }
+
+  const snapshot = clone(preset)
   app.data._settings.deletedPresetIds = app.data._settings.deletedPresetIds || []
   if (!app.data._settings.deletedPresetIds.includes(id)) app.data._settings.deletedPresetIds.push(id)
-  app.data._settings.presets = app.data._settings.presets.filter(preset => preset.id !== id)
+  app.data._settings.presets = app.data._settings.presets.filter(p => p.id !== id)
   saveData(app.data)
   render()
   haptic("warning")
-  toast("Preset deleted")
+  undoToast(`Deleted "${snapshot.desc}"`, () => {
+    app.data._settings.deletedPresetIds = (app.data._settings.deletedPresetIds || []).filter(pid => pid !== snapshot.id)
+    app.data._settings.presets.push(snapshot)
+    saveData(app.data)
+    render()
+    toast("Restored")
+  })
 }
 
 function openPresetEdit(id) {
@@ -3920,10 +4460,14 @@ function saveEditingPreset() {
 function deleteEditingPreset() {
   const preset = presetById(app.editingPresetId)
   if (!preset) return
-  if (!confirm(`Delete "${preset.desc}"?`)) return
   const id = preset.id
-  closeModal(false)
-  deletePreset(id, { confirmed: true })
+  confirmSheet({
+    title: `Delete "${preset.desc}"?`,
+    body: "This preset will be removed from your quick-add list.",
+    primaryLabel: "Delete",
+    destructive: true,
+    onConfirm: () => deletePreset(id, { confirmed: true })
+  })
 }
 
 function pickWishCat(id) {
@@ -3951,13 +4495,29 @@ function addWish() {
 function deleteWish(id, options = {}) {
   const wish = wishById(id)
   if (!wish) return
-  if (!options.confirmed && !confirm(`Delete "${wish.desc}" from your wishlist?`)) return
 
-  app.data._settings.wishes = app.data._settings.wishes.filter(wish => wish.id !== id)
+  if (!options.confirmed) {
+    confirmSheet({
+      title: `Delete "${wish.desc}"?`,
+      body: "This wish will be removed from your wishlist.",
+      primaryLabel: "Delete",
+      destructive: true,
+      onConfirm: () => deleteWish(id, { confirmed: true })
+    })
+    return
+  }
+
+  const snapshot = clone(wish)
+  app.data._settings.wishes = app.data._settings.wishes.filter(w => w.id !== id)
   saveData(app.data)
   render()
   haptic("warning")
-  toast("Wish deleted")
+  undoToast(`Deleted "${snapshot.desc}"`, () => {
+    app.data._settings.wishes.push(snapshot)
+    saveData(app.data)
+    render()
+    toast("Restored")
+  })
 }
 
 function buyWish(id) {
@@ -4026,9 +4586,13 @@ function deleteEditingWish() {
   const id = app.editingWishId
   const wish = wishById(id)
   if (!wish) return
-  if (!confirm(`Delete "${wish.desc}" from your wishlist?`)) return
-  closeModal(false)
-  deleteWish(id, { confirmed: true })
+  confirmSheet({
+    title: `Delete "${wish.desc}"?`,
+    body: "This wish will be removed from your wishlist.",
+    primaryLabel: "Delete",
+    destructive: true,
+    onConfirm: () => deleteWish(id, { confirmed: true })
+  })
 }
 
 function buyEditingWish() {
@@ -4083,23 +4647,45 @@ function saveEditingEntry() {
 function deleteEntry(id, options = {}) {
   const entry = entryById(id)
   if (!entry) return
-  if (!options.confirmed && !confirm(`Delete "${entry.desc || "Expense"}"?`)) return
+
+  if (!options.confirmed) {
+    confirmSheet({
+      title: `Delete this expense?`,
+      body: `"${entry.desc || "Expense"}" will be removed from your activity.`,
+      primaryLabel: "Delete",
+      destructive: true,
+      onConfirm: () => deleteEntry(id, { confirmed: true })
+    })
+    return
+  }
 
   if (!Array.isArray(app.data[app.key])) return
-  app.data[app.key] = app.data[app.key].filter(entry => Number(entry.id) !== Number(id))
+  const monthKey = app.key
+  const snapshot = clone(entry)
+  app.data[monthKey] = app.data[monthKey].filter(e => Number(e.id) !== Number(id))
   saveData(app.data)
   render()
   haptic("warning")
-  toast("Deleted")
+  undoToast(`Deleted "${entry.desc || "Expense"}"`, () => {
+    if (!Array.isArray(app.data[monthKey])) app.data[monthKey] = []
+    app.data[monthKey].push(snapshot)
+    saveData(app.data)
+    render()
+    toast("Restored")
+  })
 }
 
 function deleteEditingEntry() {
   const id = app.editingEntryId
   const entry = entryById(id)
   if (!entry) return
-  if (!confirm(`Delete "${entry.desc || "Expense"}"?`)) return
-  closeModal(false)
-  deleteEntry(id, { confirmed: true })
+  confirmSheet({
+    title: "Delete this expense?",
+    body: `"${entry.desc || "Expense"}" will be removed from your activity.`,
+    primaryLabel: "Delete",
+    destructive: true,
+    onConfirm: () => deleteEntry(id, { confirmed: true })
+  })
 }
 
 function saveEditingAsPreset() {
@@ -4182,17 +4768,23 @@ function importJSON() {
       const shaped = ensureDataShape(parsed)
       const monthKeys = Object.keys(shaped).filter(k => k !== "_settings" && parseMonthKey(k))
       const txCount = monthKeys.reduce((sum, key) => sum + (Array.isArray(shaped[key]) ? shaped[key].length : 0), 0)
-      const message = `This will replace your local data with ${shaped._settings.budgets.length} budgets, ${monthKeys.length} months, and ${txCount} transactions.`
+      const body = `${shaped._settings.budgets.length} budgets, ${monthKeys.length} months, and ${txCount} transactions will replace your current data.`
 
-      if (!confirm(message)) return
-
-      app.data = shaped
-      markActiveMonth(app.data, app.key)
-      saveData(app.data)
-      closeModal(false)
-      render()
-      haptic("success")
-      toast("Data imported")
+      confirmSheet({
+        title: "Replace local data?",
+        body,
+        primaryLabel: "Replace",
+        destructive: true,
+        onConfirm: () => {
+          app.data = shaped
+          markActiveMonth(app.data, app.key)
+          saveData(app.data)
+          closeModal(false)
+          render()
+          haptic("success")
+          toast("Data imported")
+        }
+      })
     } catch (error) {
       toast("Invalid JSON")
     }
@@ -4239,6 +4831,68 @@ window.addEventListener("beforeinstallprompt", event => {
 
 document.addEventListener("input", handleInput)
 document.addEventListener("click", handleClick)
+
+document.addEventListener("keydown", event => {
+  if (event.key !== "Escape" && event.key !== "Esc") return
+  if (!app.modal) return
+  if (app.modal === "methodIntro") return dismissMethodIntro()
+  if (app.modal === "installCoach") return continueInstallCoach()
+  if (app.modal === "method") return dismissMethod()
+  if (app.modal === "confirm") return resolveConfirm(false)
+  closeModal()
+})
+
+let __sheetDrag = null
+modalEl.addEventListener("touchstart", event => {
+  const sheet = event.target.closest(".sheet")
+  if (!sheet) return
+  if (modalEl.classList.contains("story-mode")) return
+  if (sheet.scrollTop > 0) return
+  const touch = event.touches[0]
+  __sheetDrag = { sheet, startY: touch.clientY, startTime: performance.now(), dy: 0 }
+}, { passive: true })
+
+modalEl.addEventListener("touchmove", event => {
+  if (!__sheetDrag) return
+  const touch = event.touches[0]
+  const dy = touch.clientY - __sheetDrag.startY
+  if (dy <= 0) {
+    __sheetDrag.sheet.style.transform = ""
+    __sheetDrag.dy = 0
+    return
+  }
+  __sheetDrag.dy = dy
+  __sheetDrag.sheet.style.transform = `translate3d(0, ${dy}px, 0)`
+  __sheetDrag.sheet.style.transition = "none"
+}, { passive: true })
+
+modalEl.addEventListener("touchend", () => {
+  if (!__sheetDrag) return
+  const { sheet, dy, startTime } = __sheetDrag
+  const elapsed = performance.now() - startTime
+  const velocity = dy / Math.max(elapsed, 1)
+  __sheetDrag = null
+
+  if (dy > 110 || velocity > 0.7) {
+    sheet.style.transition = "transform 200ms cubic-bezier(.22,1,.36,1), opacity 200ms cubic-bezier(.22,1,.36,1)"
+    sheet.style.transform = `translate3d(0, ${Math.max(dy, 200)}px, 0)`
+    sheet.style.opacity = "0"
+    haptic("light")
+    setTimeout(() => {
+      if (app.modal === "confirm") resolveConfirm(false)
+      else if (app.modal === "methodIntro") dismissMethodIntro()
+      else if (app.modal === "installCoach") continueInstallCoach()
+      else if (app.modal === "method") dismissMethod()
+      else closeModal()
+    }, 180)
+  } else {
+    sheet.style.transition = "transform 260ms cubic-bezier(.34,1.56,.64,1)"
+    sheet.style.transform = ""
+    setTimeout(() => {
+      sheet.style.transition = ""
+    }, 280)
+  }
+})
 
 if ("serviceWorker" in navigator) {
   let refreshingForUpdate = false
