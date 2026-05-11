@@ -1,5 +1,5 @@
 const STORAGE_KEY = "budget_tracker_pwa_v1"
-const APP_VERSION = "28"
+const APP_VERSION = "30"
 const ROLLOVER_START_KEY = "2026-4"
 const REVIEW_REQUIRED_MONTHS = 4
 const REVIEW_HANDOFF_URL = `https://ezratawachi.github.io/scriptable-budget-tracker/pwa/?v=${APP_VERSION}&review=1`
@@ -73,6 +73,7 @@ const app = {
   },
   inviteEmailDraft: "",
   inviteEmailScope: null,
+  confirmDeleteCtx: null,
   shareDraft: { name: "" },
   shareTargetBudgetId: null,
   shareTargetIsWorkspace: false,
@@ -988,10 +989,11 @@ async function sharedFetchAll() {
       workspaceMembers = members || []
     }
 
-    // All readable shared budgets (RLS filters to mine)
+    // All readable shared budgets (RLS filters to mine), excluding soft-deleted
     const { data: budgets, error: e2 } = await supabaseClient
       .from("shared_budgets")
       .select("*")
+      .is("deleted_at", null)
       .order("created_at", { ascending: true })
     if (e2) throw e2
 
@@ -1033,6 +1035,7 @@ async function sharedFetchAll() {
         .select("*")
         .in("budget_id", ids)
         .in("month_key", months)
+        .is("deleted_at", null)
         .order("occurred_on", { ascending: false })
       if (e4) throw e4
       for (const tx of txs || []) {
@@ -1160,15 +1163,77 @@ async function sharedUpdateBudget(budgetId, patch) {
 }
 
 async function sharedDeleteBudget(budgetId) {
+  // Soft-delete: flip deleted_at instead of removing the row. Transactions
+  // and members stay intact and can be restored within the grace window.
   const { error } = await supabaseClient
     .from("shared_budgets")
-    .delete()
+    .update({ deleted_at: new Date().toISOString() })
     .eq("id", budgetId)
   if (error) {
     toast(error.message || "Could not delete budget")
     return false
   }
   await sharedFetchAll()
+  return true
+}
+
+async function sharedRestoreBudget(budgetId) {
+  const { error } = await supabaseClient
+    .from("shared_budgets")
+    .update({ deleted_at: null })
+    .eq("id", budgetId)
+  if (error) {
+    toast(error.message || "Could not restore budget")
+    return false
+  }
+  await sharedFetchAll()
+  return true
+}
+
+async function sharedConvertSharedToLocal(budgetId) {
+  const budget = sharedBudgetById(budgetId)
+  if (!budget) return false
+
+  // Pull ALL transactions for this budget (not just current month) so nothing is lost
+  const { data: txs, error: e1 } = await supabaseClient
+    .from("shared_transactions")
+    .select("*")
+    .eq("budget_id", budgetId)
+    .is("deleted_at", null)
+  if (e1) {
+    toast(e1.message || "Could not fetch transactions")
+    return false
+  }
+
+  // Create or find a local budget with a unique slug derived from the label
+  const localId = makeCatId(budget.label)
+  app.data._settings.budgets.push({
+    id: localId,
+    label: budget.label,
+    icon: budget.icon || "🏷️",
+    budget: Number(budget.budget) || 0,
+    color: budget.color || "#0F766E"
+  })
+
+  // Copy each shared transaction into the appropriate month bucket
+  for (const tx of (txs || [])) {
+    const mk = tx.month_key
+    if (!Array.isArray(app.data[mk])) app.data[mk] = []
+    const date = tx.occurred_on
+      ? new Date(tx.occurred_on + "T00:00:00").toLocaleDateString("en-US", { day: "2-digit", month: "short" })
+      : todayLabel()
+    app.data[mk].push({
+      id: Date.now() + Math.floor(Math.random() * 1000000),
+      cat: localId,
+      amt: Math.abs(Number(tx.amount) || 0),
+      desc: tx.description || "Expense",
+      date
+    })
+  }
+  saveData(app.data)
+
+  // Soft-delete the shared budget on the server (other members lose access)
+  await sharedDeleteBudget(budgetId)
   return true
 }
 
@@ -1231,12 +1296,22 @@ async function sharedUpdateTransaction(txId, patch) {
 async function sharedDeleteTransaction(txId) {
   const { error } = await supabaseClient
     .from("shared_transactions")
-    .delete()
+    .update({ deleted_at: new Date().toISOString() })
     .eq("id", txId)
   if (error) {
     toast(error.message || "Could not delete transaction")
     return false
   }
+  await sharedFetchAll()
+  return true
+}
+
+async function sharedRestoreTransaction(txId) {
+  const { error } = await supabaseClient
+    .from("shared_transactions")
+    .update({ deleted_at: null })
+    .eq("id", txId)
+  if (error) return false
   await sharedFetchAll()
   return true
 }
@@ -3746,6 +3821,59 @@ function renderModal() {
   if (app.modal === "sharedBudgetEdit") modalEl.innerHTML = renderSharedBudgetEditModal()
   if (app.modal === "inviteByEmail") modalEl.innerHTML = renderInviteByEmailModal()
   if (app.modal === "pendingInvites") modalEl.innerHTML = renderPendingInvitesModal()
+  if (app.modal === "confirmDeleteByName") modalEl.innerHTML = renderConfirmDeleteByNameModal()
+}
+
+function renderConfirmDeleteByNameModal() {
+  const ctx = app.confirmDeleteCtx
+  if (!ctx) { closeModal(); return "" }
+  const typed = String(ctx.typed || "").trim()
+  const matches = typed.length > 0 && typed === String(ctx.targetName)
+  return `
+    <div class="sheet confirm-sheet confirm-by-name-sheet" role="alertdialog" aria-modal="true" aria-label="Confirm deletion">
+      <div class="confirm-head">
+        <div class="confirm-title">Delete "${esc(ctx.targetName)}"?</div>
+        ${ctx.body ? `<div class="confirm-body">${esc(ctx.body)}</div>` : ""}
+        <div class="confirm-body confirm-type-hint">Type <strong>${esc(ctx.targetName)}</strong> below to confirm.</div>
+      </div>
+      <input class="field confirm-name-field" id="confirm-name-field" type="text" autocomplete="off" autocapitalize="off" spellcheck="false" autocorrect="off" placeholder="${esc(ctx.targetName)}" value="${attr(ctx.typed || "")}">
+      <div class="confirm-actions">
+        <button class="secondary-btn" data-action="closeModal">Cancel</button>
+        <button class="danger-btn" id="confirm-delete-by-name-btn" data-action="confirmDeleteByNameYes" ${matches ? "" : "disabled"}>Delete</button>
+      </div>
+    </div>
+  `
+}
+
+function confirmDeleteByName(options = {}) {
+  app.confirmDeleteCtx = {
+    targetName: String(options.targetName || ""),
+    typed: "",
+    body: options.body || "",
+    onConfirm: typeof options.onConfirm === "function" ? options.onConfirm : () => {}
+  }
+  app.modal = "confirmDeleteByName"
+  haptic("warning")
+  renderModal()
+  setTimeout(() => {
+    const el = document.getElementById("confirm-name-field")
+    if (el) el.focus()
+  }, 280)
+}
+
+function doConfirmDeleteByNameYes() {
+  const ctx = app.confirmDeleteCtx
+  if (!ctx) { closeModal(); return }
+  const typed = String(ctx.typed || "").trim()
+  if (typed !== String(ctx.targetName)) {
+    toast("Type the name exactly")
+    return
+  }
+  const fn = ctx.onConfirm
+  app.confirmDeleteCtx = null
+  app.modal = null
+  renderModal()
+  try { fn() } catch (_) {}
 }
 
 function renderInviteByEmailModal() {
@@ -3841,7 +3969,8 @@ function renderSharedBudgetEditModal() {
         ? ""
         : `<button class="secondary-btn cloud-full" data-action="openBudgetMembers" data-id="${attr(budget.id)}">${icon("users")} Manage members</button>`}
       <button class="secondary-btn cloud-full" data-action="openInviteByEmailBudget" data-id="${attr(budget.id)}">${icon("share")} Invite by email</button>
-      <button class="danger-btn cloud-full" data-action="confirmDeleteSharedBudget" data-id="${attr(budget.id)}">${icon("trash")} Delete shared budget</button>
+      <button class="secondary-btn cloud-full" data-action="openConvertSharedToLocal" data-id="${attr(budget.id)}">${icon("doorOut")} Stop sharing &mdash; keep my copy</button>
+      <button class="danger-btn cloud-full danger-final" data-action="confirmDeleteSharedBudget" data-id="${attr(budget.id)}">${icon("trash")} Delete for everyone</button>
     </div>
   `
 }
@@ -3871,18 +4000,42 @@ async function doSaveSharedBudgetEdit() {
 function doConfirmDeleteSharedBudget(budgetId) {
   const budget = sharedBudgetById(budgetId)
   if (!budget) return
-  confirmSheet({
-    title: `Delete "${budget.label}"?`,
-    body: "All shared transactions in this budget will be deleted for every member. This cannot be undone.",
-    primaryLabel: "Delete",
-    destructive: true,
+  confirmDeleteByName({
+    targetName: budget.label,
+    body: "Every member loses access. If you want to keep your own copy, use 'Stop sharing' instead.",
     onConfirm: async () => {
       const ok = await sharedDeleteBudget(budgetId)
       if (!ok) { haptic("error"); return }
-      closeModal(false)
       render()
       haptic("warning")
-      toast("Shared budget deleted")
+      undoToast(`Deleted "${budget.label}"`, async () => {
+        const restored = await sharedRestoreBudget(budgetId)
+        if (restored) {
+          render()
+          toast("Restored")
+        } else {
+          toast("Could not restore")
+        }
+      })
+    }
+  })
+}
+
+function doConvertSharedToLocal(budgetId) {
+  const budget = sharedBudgetById(budgetId)
+  if (!budget) return
+  confirmSheet({
+    title: `Stop sharing "${budget.label}"?`,
+    body: "All transactions in this budget come back to your local data. Other members lose access. You can re-share later.",
+    primaryLabel: "Stop sharing",
+    destructive: false,
+    onConfirm: async () => {
+      const ok = await sharedConvertSharedToLocal(budgetId)
+      if (!ok) { haptic("error"); return }
+      closeModal(false)
+      render()
+      haptic("success")
+      toast(`"${budget.label}" is now local`)
     }
   })
 }
@@ -4774,6 +4927,13 @@ function handleInput(event) {
     app.inviteEmailDraft = target.value
     updateButtonState("invite-email-send", isLikelyEmail(target.value))
   }
+
+  if (target.id === "confirm-name-field") {
+    if (!app.confirmDeleteCtx) return
+    app.confirmDeleteCtx.typed = target.value
+    const typed = String(target.value || "").trim()
+    updateButtonState("confirm-delete-by-name-btn", typed === String(app.confirmDeleteCtx.targetName))
+  }
 }
 
 function handleClick(event) {
@@ -4916,6 +5076,8 @@ function handleClick(event) {
   if (action === "declineInviteByToken") doDeclineInviteByToken(id)
   if (action === "openInviteByEmailWorkspace") openInviteByEmailWorkspace()
   if (action === "openInviteByEmailBudget") openInviteByEmailBudget(id)
+  if (action === "openConvertSharedToLocal") doConvertSharedToLocal(id)
+  if (action === "confirmDeleteByNameYes") doConfirmDeleteByNameYes()
 }
 
 function openCreateWorkspace() {
@@ -5872,6 +6034,7 @@ function closeModal(shouldRender = true) {
 
   app.modal = null
   app.confirmConfig = null
+  app.confirmDeleteCtx = null
   if (previousModal === "methodIntro") app.methodIntroMode = "firstRun"
   if (previousModal === "installCoach") app.installCoachNext = null
   app.editingBudgetId = null
@@ -6483,7 +6646,16 @@ async function deleteEntry(id, options = {}) {
     if (!ok) { haptic("error"); return }
     render()
     haptic("warning")
-    toast(`Deleted "${entry.desc || "Expense"}"`)
+    const txId = entry.id
+    undoToast(`Deleted "${entry.desc || "Expense"}"`, async () => {
+      const restored = await sharedRestoreTransaction(txId)
+      if (restored) {
+        render()
+        toast("Restored")
+      } else {
+        toast("Could not restore")
+      }
+    })
     return
   }
 

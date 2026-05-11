@@ -1422,6 +1422,62 @@ input:focus-visible{
   --stroke:2;
 }
 
+/* Type-the-name confirmation */
+
+.confirm-by-name-sheet{
+  max-width:420px;
+  padding:20px 20px 16px;
+}
+
+.confirm-by-name-sheet .confirm-head{
+  padding:8px 4px 12px;
+}
+
+.confirm-type-hint{
+  margin-top:8px;
+  font-size:13px;
+  color:var(--mut);
+}
+
+.confirm-type-hint strong{
+  color:var(--txt);
+  font-weight:800;
+  font-family:ui-monospace,Menlo,monospace;
+  background:var(--card2);
+  border:.5px solid var(--bord);
+  padding:1px 6px;
+  border-radius:6px;
+}
+
+.confirm-name-field{
+  width:100%;
+  font-family:ui-monospace,Menlo,monospace;
+  font-size:14px;
+  font-weight:700;
+  letter-spacing:.005em;
+}
+
+.confirm-by-name-sheet .confirm-actions{
+  margin-top:14px;
+}
+
+/* Destructive 'final' button is visually quieter than 'Stop sharing' */
+.danger-btn.danger-final{
+  background:transparent;
+  border:.5px solid var(--red2);
+  color:var(--red);
+  font-weight:700;
+  letter-spacing:-.005em;
+}
+
+.danger-btn.danger-final:hover{
+  background:var(--red2);
+}
+
+[data-theme="dark"] .danger-btn.danger-final{
+  border-color:rgba(248,113,113,.25);
+}
+
 /* Pending invite list row */
 
 .pending-invite-row{
