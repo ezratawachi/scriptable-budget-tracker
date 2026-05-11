@@ -1,4 +1,4 @@
-const CACHE_NAME = "budget-pwa-v28"
+const CACHE_NAME = "budget-pwa-v29"
 const ASSETS = [
   "./",
   "./index.html",
@@ -50,7 +50,7 @@ self.addEventListener("fetch", event => {
 
   if (request.mode === "navigate") {
     event.respondWith(
-      fetch(request)
+      fetch(request, { cache: "reload" })
         .then(response => {
           const copy = response.clone()
           caches.open(CACHE_NAME).then(cache => cache.put("./index.html", copy))
