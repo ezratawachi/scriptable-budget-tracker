@@ -1,5 +1,5 @@
 const STORAGE_KEY = "budget_tracker_pwa_v1"
-const APP_VERSION = "26"
+const APP_VERSION = "27"
 const ROLLOVER_START_KEY = "2026-4"
 const REVIEW_REQUIRED_MONTHS = 4
 const REVIEW_HANDOFF_URL = `https://ezratawachi.github.io/scriptable-budget-tracker/pwa/?v=${APP_VERSION}&review=1`
@@ -17,6 +17,8 @@ const queryParams = new URLSearchParams(window.location.search)
 const freshPreviewMode = queryParams.has("fresh-preview")
 const storyPreviewMode = freshPreviewMode || queryParams.has("story-preview") || queryParams.has("preview-intro")
 const reviewDeepLinkMode = queryParams.has("review")
+const inviteTokenFromURL = queryParams.get("invite")
+const APP_BASE_URL = `${window.location.origin}${window.location.pathname}`
 
 let supabaseClient = null
 let cloudSaveTimer = null
@@ -54,6 +56,25 @@ const app = {
   pendingUndos: [],
   theme: "auto",
   methodJustSaved: false,
+  shared: {
+    workspace: null,
+    workspaceMembers: [],
+    budgets: [],
+    budgetMembers: {},
+    transactions: {},
+    pendingInvite: null,
+    inviteTokenFromURL: inviteTokenFromURL || null,
+    lastSyncedAt: null,
+    syncing: false,
+    pullToRefresh: 0,
+    error: null
+  },
+  shareDraft: { name: "" },
+  shareTargetBudgetId: null,
+  shareTargetIsWorkspace: false,
+  inviteShareLink: null,
+  inviteShareLinkExpiresAt: null,
+  inviteShareContextName: null,
   cloudUser: null,
   cloudEmail: "",
   cloudReady: false,
@@ -399,6 +420,7 @@ function cloudErrorMessage(error) {
 
 function applyCloudSession(session) {
   const user = session && session.user ? session.user : null
+  const wasSignedIn = !!app.cloudUser
   app.cloudUser = user
   app.cloudEmail = user ? (user.email || "") : ""
 
@@ -408,9 +430,52 @@ function applyCloudSession(session) {
     app.cloudBusy = false
     app.lastCloudSyncAt = null
     app.cloudStatus = "Sign in to keep your data backed up"
+    if (wasSignedIn) sharedClear()
   } else if (!app.cloudStatus || app.cloudStatus === "Sign in to keep your data backed up") {
     app.cloudStatus = "Setting up backup..."
   }
+}
+
+async function onCloudReady() {
+  if (!supabaseClient || !app.cloudUser) return
+  await sharedFetchAll()
+
+  // Handle invite from URL once
+  const token = app.shared.inviteTokenFromURL
+  if (token) {
+    app.shared.inviteTokenFromURL = null
+    try {
+      const url = new URL(window.location.href)
+      url.searchParams.delete("invite")
+      window.history.replaceState({}, "", url.toString())
+    } catch (_) {}
+
+    const invite = await inviteFetch(token)
+    if (invite && !invite.used_at && new Date(invite.expires_at) > new Date() && invite.inviter_id !== app.cloudUser.id) {
+      app.shared.pendingInvite = {
+        token: invite.token,
+        inviterEmail: invite.inviter_email,
+        workspaceId: invite.workspace_id,
+        budgetId: invite.budget_id,
+        workspaceName: invite.workspaces && invite.workspaces.name,
+        budgetLabel: invite.shared_budgets && invite.shared_budgets.label,
+        role: invite.role,
+        expiresAt: invite.expires_at
+      }
+      app.modal = "acceptInvite"
+      renderModal()
+    } else if (invite && invite.used_at) {
+      toast("Invite already used")
+    } else if (invite && new Date(invite.expires_at) < new Date()) {
+      toast("Invite expired")
+    } else if (invite && invite.inviter_id === app.cloudUser.id) {
+      toast("That's your own invite link")
+    } else if (token) {
+      toast("Invite not found")
+    }
+  }
+
+  render()
 }
 
 function scheduleCloudSave() {
@@ -464,7 +529,7 @@ async function initCloud() {
 
     applyCloudSession(session)
     if (session && session.user) {
-      startCloudSync({ preferNewer: true, silent: true })
+      startCloudSync({ preferNewer: true, silent: true }).then(() => onCloudReady())
     } else {
       render()
     }
@@ -476,6 +541,7 @@ async function initCloud() {
     applyCloudSession(data.session)
     if (data.session && data.session.user) {
       await startCloudSync({ preferNewer: true, silent: true })
+      await onCloudReady()
     } else {
       render()
     }
@@ -837,6 +903,571 @@ async function pullCloudData(options = {}) {
   }
 }
 
+// ============================================================
+// Shared budgets — workspaces, members, invites
+// ============================================================
+
+function sharedClear() {
+  app.shared.workspace = null
+  app.shared.workspaceMembers = []
+  app.shared.budgets = []
+  app.shared.budgetMembers = {}
+  app.shared.transactions = {}
+  app.shared.pendingInvite = null
+  app.shared.lastSyncedAt = null
+  app.shared.syncing = false
+  app.shared.error = null
+}
+
+function sharedBudgetById(id) {
+  return app.shared.budgets.find(b => b.id === id) || null
+}
+
+function sharedTxByBudget(budgetId) {
+  return app.shared.transactions[budgetId] || []
+}
+
+function previousMonthKey(key) {
+  const parsed = parseMonthKey(key)
+  if (!parsed) return key
+  const date = new Date(parsed.year, parsed.month - 1, 1)
+  date.setMonth(date.getMonth() - 1)
+  return `${date.getFullYear()}-${date.getMonth()}`
+}
+
+function randomInviteToken() {
+  const bytes = new Uint8Array(12)
+  crypto.getRandomValues(bytes)
+  return Array.from(bytes, b => b.toString(36).padStart(2, "0")).join("").slice(0, 16)
+}
+
+function inviteShareURL(token) {
+  return `${APP_BASE_URL}?invite=${encodeURIComponent(token)}`
+}
+
+async function sharedFetchAll() {
+  if (!supabaseClient || !app.cloudUser) return false
+  app.shared.syncing = true
+
+  try {
+    const myId = app.cloudUser.id
+
+    // Workspace membership (v1: max 1)
+    const { data: wsMembership, error: e1 } = await supabaseClient
+      .from("workspace_members")
+      .select("workspace_id, role, workspaces(id, name, owner_id, created_at)")
+      .eq("user_id", myId)
+      .limit(1)
+      .maybeSingle()
+    if (e1) throw e1
+
+    let workspace = null
+    let workspaceMembers = []
+    if (wsMembership && wsMembership.workspaces) {
+      workspace = {
+        id: wsMembership.workspaces.id,
+        name: wsMembership.workspaces.name,
+        ownerId: wsMembership.workspaces.owner_id,
+        myRole: wsMembership.role
+      }
+      const { data: members, error: e1b } = await supabaseClient
+        .from("workspace_members")
+        .select("user_id, display_email, role, joined_at")
+        .eq("workspace_id", workspace.id)
+      if (e1b) throw e1b
+      workspaceMembers = members || []
+    }
+
+    // All readable shared budgets (RLS filters to mine)
+    const { data: budgets, error: e2 } = await supabaseClient
+      .from("shared_budgets")
+      .select("*")
+      .order("created_at", { ascending: true })
+    if (e2) throw e2
+
+    const budgetList = (budgets || []).map(b => ({
+      id: b.id,
+      label: b.label,
+      icon: b.icon || "🏷️",
+      budget: Number(b.monthly_budget) || 0,
+      color: b.color || "#0F766E",
+      workspaceId: b.workspace_id,
+      ownerId: b.owner_id,
+      myRole: b.owner_id === myId ? "owner" : "member",
+      createdAt: b.created_at,
+      rolloverStartKey: b.rollover_start_key || ROLLOVER_START_KEY
+    }))
+
+    // Members per budget (relevant for standalone-shared budgets)
+    const budgetMembers = {}
+    if (budgetList.length) {
+      const ids = budgetList.map(b => b.id)
+      const { data: bms, error: e3 } = await supabaseClient
+        .from("budget_members")
+        .select("budget_id, user_id, display_email, role, joined_at")
+        .in("budget_id", ids)
+      if (e3) throw e3
+      for (const bm of bms || []) {
+        if (!budgetMembers[bm.budget_id]) budgetMembers[bm.budget_id] = []
+        budgetMembers[bm.budget_id].push(bm)
+      }
+    }
+
+    // Transactions for current + previous month
+    const transactions = {}
+    if (budgetList.length) {
+      const ids = budgetList.map(b => b.id)
+      const months = [app.key, previousMonthKey(app.key)]
+      const { data: txs, error: e4 } = await supabaseClient
+        .from("shared_transactions")
+        .select("*")
+        .in("budget_id", ids)
+        .in("month_key", months)
+        .order("occurred_on", { ascending: false })
+      if (e4) throw e4
+      for (const tx of txs || []) {
+        if (!transactions[tx.budget_id]) transactions[tx.budget_id] = []
+        transactions[tx.budget_id].push({
+          id: tx.id,
+          budgetId: tx.budget_id,
+          createdBy: tx.created_by,
+          createdByEmail: tx.created_by_email,
+          amount: Number(tx.amount) || 0,
+          description: tx.description || "",
+          occurredOn: tx.occurred_on,
+          monthKey: tx.month_key,
+          createdAt: tx.created_at
+        })
+      }
+    }
+
+    app.shared.workspace = workspace
+    app.shared.workspaceMembers = workspaceMembers
+    app.shared.budgets = budgetList
+    app.shared.budgetMembers = budgetMembers
+    app.shared.transactions = transactions
+    app.shared.lastSyncedAt = Date.now()
+    app.shared.syncing = false
+    app.shared.error = null
+    return true
+  } catch (error) {
+    app.shared.syncing = false
+    app.shared.error = (error && error.message) ? error.message : String(error)
+    console.warn("sharedFetchAll error", error)
+    return false
+  }
+}
+
+async function sharedCreateWorkspace(name) {
+  if (!supabaseClient || !app.cloudUser) {
+    toast("Sign in first")
+    return null
+  }
+  const trimmed = String(name || "").trim() || "Shared"
+
+  const { data: ws, error } = await supabaseClient
+    .from("workspaces")
+    .insert({ owner_id: app.cloudUser.id, name: trimmed })
+    .select()
+    .single()
+  if (error) {
+    toast(error.message || "Could not create workspace")
+    return null
+  }
+
+  const { error: memErr } = await supabaseClient
+    .from("workspace_members")
+    .insert({
+      workspace_id: ws.id,
+      user_id: app.cloudUser.id,
+      role: "owner",
+      display_email: app.cloudEmail || null
+    })
+  if (memErr) {
+    toast(memErr.message || "Workspace created but membership failed")
+    return null
+  }
+
+  await sharedFetchAll()
+  return ws
+}
+
+async function sharedCreateBudget(payload) {
+  if (!supabaseClient || !app.cloudUser) {
+    toast("Sign in first")
+    return null
+  }
+  const row = {
+    owner_id: app.cloudUser.id,
+    workspace_id: payload.workspaceId || null,
+    label: String(payload.label || "Budget").trim() || "Budget",
+    icon: payload.icon || "🏷️",
+    monthly_budget: Number(payload.monthlyBudget) || 0,
+    color: payload.color || "#0F766E",
+    rollover_start_key: payload.rolloverStartKey || ROLLOVER_START_KEY
+  }
+  const { data, error } = await supabaseClient
+    .from("shared_budgets")
+    .insert(row)
+    .select()
+    .single()
+  if (error) {
+    toast(error.message || "Could not create shared budget")
+    return null
+  }
+
+  // For standalone-shared budgets, the owner needs a budget_members row so RLS
+  // for shared_transactions read-checks pass without falling back to workspace
+  if (!row.workspace_id) {
+    await supabaseClient.from("budget_members").upsert({
+      budget_id: data.id,
+      user_id: app.cloudUser.id,
+      role: "owner",
+      display_email: app.cloudEmail || null
+    }, { onConflict: "budget_id,user_id" })
+  }
+
+  await sharedFetchAll()
+  return data
+}
+
+async function sharedUpdateBudget(budgetId, patch) {
+  const { error } = await supabaseClient
+    .from("shared_budgets")
+    .update(patch)
+    .eq("id", budgetId)
+  if (error) {
+    toast(error.message || "Could not update budget")
+    return false
+  }
+  await sharedFetchAll()
+  return true
+}
+
+async function sharedDeleteBudget(budgetId) {
+  const { error } = await supabaseClient
+    .from("shared_budgets")
+    .delete()
+    .eq("id", budgetId)
+  if (error) {
+    toast(error.message || "Could not delete budget")
+    return false
+  }
+  await sharedFetchAll()
+  return true
+}
+
+async function sharedAddTransaction(budgetId, payload) {
+  if (!supabaseClient || !app.cloudUser) {
+    toast("Sign in first")
+    return null
+  }
+  const amount = Math.abs(Number(payload.amount) || 0)
+  if (!amount) {
+    toast("Amount must be greater than zero")
+    return null
+  }
+  const occurredOn = String(payload.occurredOn || new Date().toISOString().slice(0, 10))
+  const date = new Date(occurredOn)
+  const mk = `${date.getFullYear()}-${date.getMonth()}`
+  const row = {
+    budget_id: budgetId,
+    created_by: app.cloudUser.id,
+    created_by_email: app.cloudEmail || null,
+    amount,
+    description: String(payload.description || "").trim() || "Expense",
+    occurred_on: occurredOn,
+    month_key: mk
+  }
+  const { data, error } = await supabaseClient
+    .from("shared_transactions")
+    .insert(row)
+    .select()
+    .single()
+  if (error) {
+    toast(error.message || "Could not add transaction")
+    return null
+  }
+  await sharedFetchAll()
+  return data
+}
+
+async function sharedUpdateTransaction(txId, patch) {
+  const update = {}
+  if ("amount" in patch) update.amount = Math.abs(Number(patch.amount) || 0)
+  if ("description" in patch) update.description = String(patch.description || "").trim() || "Expense"
+  if ("occurredOn" in patch) {
+    update.occurred_on = patch.occurredOn
+    const date = new Date(patch.occurredOn)
+    update.month_key = `${date.getFullYear()}-${date.getMonth()}`
+  }
+  const { error } = await supabaseClient
+    .from("shared_transactions")
+    .update(update)
+    .eq("id", txId)
+  if (error) {
+    toast(error.message || "Could not update transaction")
+    return false
+  }
+  await sharedFetchAll()
+  return true
+}
+
+async function sharedDeleteTransaction(txId) {
+  const { error } = await supabaseClient
+    .from("shared_transactions")
+    .delete()
+    .eq("id", txId)
+  if (error) {
+    toast(error.message || "Could not delete transaction")
+    return false
+  }
+  await sharedFetchAll()
+  return true
+}
+
+async function sharedLeaveWorkspace() {
+  if (!app.shared.workspace) return false
+  const { error } = await supabaseClient
+    .from("workspace_members")
+    .delete()
+    .eq("workspace_id", app.shared.workspace.id)
+    .eq("user_id", app.cloudUser.id)
+  if (error) {
+    toast(error.message || "Could not leave workspace")
+    return false
+  }
+  await sharedFetchAll()
+  return true
+}
+
+async function sharedLeaveBudget(budgetId) {
+  const { error } = await supabaseClient
+    .from("budget_members")
+    .delete()
+    .eq("budget_id", budgetId)
+    .eq("user_id", app.cloudUser.id)
+  if (error) {
+    toast(error.message || "Could not leave budget")
+    return false
+  }
+  await sharedFetchAll()
+  return true
+}
+
+async function sharedRemoveMember(scope, scopeId, userId) {
+  const table = scope === "workspace" ? "workspace_members" : "budget_members"
+  const key = scope === "workspace" ? "workspace_id" : "budget_id"
+  const { error } = await supabaseClient
+    .from(table)
+    .delete()
+    .eq(key, scopeId)
+    .eq("user_id", userId)
+  if (error) {
+    toast(error.message || "Could not remove member")
+    return false
+  }
+  await sharedFetchAll()
+  return true
+}
+
+async function sharedConvertLocalBudget(localBudgetId, options = {}) {
+  if (!supabaseClient || !app.cloudUser) {
+    toast("Sign in to share")
+    return null
+  }
+  const localBudget = rawCategoryById(localBudgetId)
+  if (!localBudget) return null
+
+  // 1. Create the shared budget
+  const target = options.target || "workspace"
+  let workspaceId = null
+  if (target === "workspace") {
+    if (app.shared.workspace) {
+      workspaceId = app.shared.workspace.id
+    } else {
+      const workspace = await sharedCreateWorkspace(options.workspaceName || "Shared")
+      if (!workspace) return null
+      workspaceId = workspace.id
+    }
+  }
+
+  const sharedBudget = await sharedCreateBudget({
+    workspaceId,
+    label: localBudget.label,
+    icon: localBudget.icon,
+    monthlyBudget: localBudget.budget,
+    color: localBudget.color,
+    rolloverStartKey: ROLLOVER_START_KEY
+  })
+  if (!sharedBudget) return null
+
+  // 2. Copy local transactions into shared_transactions
+  const txInserts = []
+  Object.keys(app.data).forEach(key => {
+    if (key === "_settings" || !Array.isArray(app.data[key]) || !parseMonthKey(key)) return
+    app.data[key].forEach(entry => {
+      if (entry.cat !== localBudgetId) return
+      const occurredISO = entry.dateISO || new Date().toISOString().slice(0, 10)
+      txInserts.push({
+        budget_id: sharedBudget.id,
+        created_by: app.cloudUser.id,
+        created_by_email: app.cloudEmail || null,
+        amount: Number(entry.amt) || 0,
+        description: entry.desc || "Expense",
+        occurred_on: occurredISO,
+        month_key: key
+      })
+    })
+  })
+
+  if (txInserts.length) {
+    const { error: txError } = await supabaseClient.from("shared_transactions").insert(txInserts)
+    if (txError) {
+      // Best-effort: budget exists but tx copy failed. Surface the error and keep going.
+      console.warn("Failed to copy local transactions", txError)
+      toast("Budget shared, but some history could not be copied")
+    }
+  }
+
+  // 3. Delete the local budget + its transactions
+  app.data._settings.budgets = app.data._settings.budgets.filter(b => b.id !== localBudgetId)
+  Object.keys(app.data).forEach(key => {
+    if (key === "_settings" || !Array.isArray(app.data[key])) return
+    app.data[key] = app.data[key].filter(entry => entry.cat !== localBudgetId)
+  })
+  app.data._settings.presets = app.data._settings.presets.filter(p => p.cat !== localBudgetId)
+  app.data._settings.wishes = app.data._settings.wishes.filter(w => w.cat !== localBudgetId)
+  saveData(app.data)
+
+  await sharedFetchAll()
+  return sharedBudget
+}
+
+async function inviteCreate(options = {}) {
+  if (!supabaseClient || !app.cloudUser) {
+    toast("Sign in first")
+    return null
+  }
+  const token = randomInviteToken()
+  const row = {
+    token,
+    inviter_id: app.cloudUser.id,
+    inviter_email: app.cloudEmail || null,
+    workspace_id: options.workspaceId || null,
+    budget_id: options.budgetId || null,
+    role: options.role || "member"
+  }
+  if (!row.workspace_id && !row.budget_id) {
+    toast("Need a workspace or budget to share")
+    return null
+  }
+  const { data, error } = await supabaseClient
+    .from("invites")
+    .insert(row)
+    .select()
+    .single()
+  if (error) {
+    toast(error.message || "Could not create invite")
+    return null
+  }
+  return { token: data.token, url: inviteShareURL(data.token), invite: data }
+}
+
+async function inviteFetch(token) {
+  if (!supabaseClient) return null
+  const { data, error } = await supabaseClient
+    .from("invites")
+    .select("token, inviter_id, inviter_email, workspace_id, budget_id, role, expires_at, used_at, workspaces(id, name), shared_budgets(id, label, icon)")
+    .eq("token", token)
+    .maybeSingle()
+  if (error || !data) return null
+  return data
+}
+
+async function inviteAccept(token) {
+  if (!supabaseClient || !app.cloudUser) {
+    toast("Sign in to accept")
+    return null
+  }
+  const invite = await inviteFetch(token)
+  if (!invite) {
+    toast("Invite not found")
+    return null
+  }
+  if (invite.used_at) {
+    toast("Invite already used")
+    return null
+  }
+  if (invite.expires_at && new Date(invite.expires_at) < new Date()) {
+    toast("Invite expired")
+    return null
+  }
+  if (invite.inviter_id === app.cloudUser.id) {
+    toast("You created this invite")
+    return null
+  }
+
+  // Insert membership row
+  if (invite.workspace_id) {
+    const { error: e1 } = await supabaseClient
+      .from("workspace_members")
+      .upsert({
+        workspace_id: invite.workspace_id,
+        user_id: app.cloudUser.id,
+        role: invite.role || "member",
+        display_email: app.cloudEmail || null
+      }, { onConflict: "workspace_id,user_id" })
+    if (e1) {
+      toast(e1.message || "Could not join workspace")
+      return null
+    }
+  } else if (invite.budget_id) {
+    const { error: e2 } = await supabaseClient
+      .from("budget_members")
+      .upsert({
+        budget_id: invite.budget_id,
+        user_id: app.cloudUser.id,
+        role: invite.role || "member",
+        display_email: app.cloudEmail || null
+      }, { onConflict: "budget_id,user_id" })
+    if (e2) {
+      toast(e2.message || "Could not join budget")
+      return null
+    }
+  }
+
+  // Mark invite used
+  await supabaseClient
+    .from("invites")
+    .update({ used_at: new Date().toISOString(), used_by: app.cloudUser.id })
+    .eq("token", token)
+
+  await sharedFetchAll()
+  return invite
+}
+
+async function manualRefresh() {
+  if (!supabaseClient || !app.cloudUser) {
+    haptic("warning")
+    toast("Sign in to sync")
+    return
+  }
+  app.shared.syncing = true
+  refreshCloudSurface()
+  render()
+  const ok = await sharedFetchAll()
+  app.shared.syncing = false
+  render()
+  if (ok) {
+    haptic("success")
+    toast("Synced")
+  } else {
+    haptic("error")
+    toast("Sync failed")
+  }
+}
+
 function monthKey(date = new Date()) {
   return `${date.getFullYear()}-${date.getMonth()}`
 }
@@ -941,9 +1572,9 @@ function calcState(data, key) {
   data = ensureDataShape(data)
   const rawBudgets = data._settings.budgets
   const rolloverMap = calcRolloverMap(data, key, rawBudgets)
-  const entries = Array.isArray(data[key]) ? data[key] : []
+  const localEntries = Array.isArray(data[key]) ? data[key] : []
 
-  const budgets = rawBudgets.map(b => {
+  const localBudgets = rawBudgets.map(b => {
     const baseBudget = Number(b.budget) || 0
     const rollover = roundMoney(rolloverMap[b.id] || 0)
     return {
@@ -953,9 +1584,68 @@ function calcState(data, key) {
       color: b.color,
       baseBudget,
       rollover,
-      budget: roundMoney(baseBudget + rollover)
+      budget: roundMoney(baseBudget + rollover),
+      shared: false,
+      myRole: "owner",
+      members: []
     }
   })
+
+  const sharedBudgets = (app.shared.budgets || []).map(b => {
+    const baseBudget = Number(b.budget) || 0
+    const allMembers = b.workspaceId
+      ? app.shared.workspaceMembers
+      : (app.shared.budgetMembers[b.id] || [])
+    return {
+      id: b.id,
+      label: b.label,
+      icon: b.icon,
+      color: b.color,
+      baseBudget,
+      rollover: 0,
+      budget: baseBudget,
+      shared: true,
+      myRole: b.myRole,
+      ownerId: b.ownerId,
+      workspaceId: b.workspaceId,
+      members: allMembers
+    }
+  })
+
+  const budgets = [...localBudgets, ...sharedBudgets]
+
+  const localEntriesShaped = localEntries.map(e => ({
+    id: String(e.id),
+    cat: e.cat,
+    amt: Number(e.amt) || 0,
+    desc: e.desc || "Expense",
+    date: e.date || "",
+    shared: false
+  }))
+
+  const sharedEntriesShaped = []
+  for (const b of sharedBudgets) {
+    const txs = app.shared.transactions[b.id] || []
+    for (const tx of txs) {
+      if (tx.monthKey !== key) continue
+      const dateLabel = tx.occurredOn
+        ? new Date(tx.occurredOn + "T00:00:00").toLocaleDateString("en-US", { day: "2-digit", month: "short" })
+        : ""
+      sharedEntriesShaped.push({
+        id: tx.id,
+        cat: b.id,
+        amt: tx.amount,
+        desc: tx.description,
+        date: dateLabel,
+        createdBy: tx.createdBy,
+        createdByEmail: tx.createdByEmail,
+        occurredOn: tx.occurredOn,
+        shared: true
+      })
+    }
+  }
+
+  const entries = [...localEntriesShaped, ...sharedEntriesShaped]
 
   const spent = {}
   budgets.forEach(b => { spent[b.id] = 0 })
@@ -1026,7 +1716,11 @@ function rawCategoryById(id) {
 }
 
 function entryById(id) {
-  return (app.data[app.key] || []).find(entry => Number(entry.id) === Number(id))
+  // Local entries use numeric ids, shared use UUIDs — match on string for both
+  const target = String(id)
+  const inMerged = (app.state && app.state.entries) ? app.state.entries.find(e => String(e.id) === target) : null
+  if (inMerged) return inMerged
+  return (app.data[app.key] || []).find(entry => String(entry.id) === target)
 }
 
 function presetById(id) {
@@ -1132,7 +1826,13 @@ const ICON_PATHS = {
   bell: '<path d="M6 8a6 6 0 1 1 12 0c0 7 3 8 3 8H3s3-1 3-8Z"/><path d="M10 21a2 2 0 0 0 4 0"/>',
   info: '<circle cx="12" cy="12" r="9"/><path d="M12 8h.01"/><path d="M11 12h1v4h1"/>',
   shield: '<path d="M12 3 4 6v6c0 5 4 8 8 9 4-1 8-4 8-9V6l-8-3Z"/>',
-  sparkles: '<path d="M12 4v4"/><path d="M12 16v4"/><path d="M4 12h4"/><path d="M16 12h4"/><path d="m6 6 2 2"/><path d="m16 16 2 2"/><path d="m6 18 2-2"/><path d="m16 8 2-2"/>'
+  sparkles: '<path d="M12 4v4"/><path d="M12 16v4"/><path d="M4 12h4"/><path d="M16 12h4"/><path d="m6 6 2 2"/><path d="m16 16 2 2"/><path d="m6 18 2-2"/><path d="m16 8 2-2"/>',
+  users: '<path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/>',
+  share: '<circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><path d="m8.59 13.51 6.83 3.98"/><path d="m15.41 6.51-6.82 3.98"/>',
+  link: '<path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/>',
+  refresh: '<path d="M3 12a9 9 0 0 1 15-6.7L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-15 6.7L3 16"/><path d="M3 21v-5h5"/>',
+  copy: '<rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>',
+  doorOut: '<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><path d="M16 17l5-5-5-5"/><path d="M21 12H9"/>'
 }
 
 const ICON_PICKER_GROUPS = [
@@ -1560,6 +2260,10 @@ function renderHome() {
     : ""
   const cloudTitle = app.cloudUser ? "Backup connected" : "Set up backup"
   const cloudButton = `<button class="top-btn icon-btn cloud-btn ${app.cloudUser ? "online" : ""} ${app.cloudBusy ? "syncing" : ""}" title="${cloudTitle}" aria-label="${cloudTitle}" data-action="go" data-view="account">${icon("cloud")}</button>`
+  const hasShared = app.shared.workspace || app.shared.budgets.length > 0
+  const refreshButton = (app.cloudUser && hasShared)
+    ? `<button class="top-btn icon-btn refresh-btn ${app.shared.syncing ? "syncing" : ""}" title="Refresh shared" aria-label="Refresh shared" data-action="manualRefresh">${icon("refresh")}</button>`
+    : ""
   const budgetContent = app.state.budgets.length
     ? app.state.budgets.map(renderBudgetCard).join("")
     : emptyState({
@@ -1573,6 +2277,7 @@ function renderHome() {
   return `
     <section class="view">
       ${header("Budget Tracker", monthLabel(app.key), `
+        ${refreshButton}
         ${cloudButton}
         ${installButton}
       `)}
@@ -1612,14 +2317,18 @@ function renderBudgetCard(budget) {
   const color = over ? "var(--red)" : cssColor(budget.color)
   const remaining = limit - spent
   const roll = rolloverLabel(budget)
+  const memberCount = budget.shared && Array.isArray(budget.members) ? budget.members.length : 0
+  const sharedChip = budget.shared
+    ? `<span class="shared-chip" title="Shared with ${memberCount} ${memberCount === 1 ? "person" : "people"}">${icon("users")}${memberCount > 1 ? `<span>${memberCount}</span>` : ""}</span>`
+    : ""
 
   return `
-    <button class="card budget-card" data-action="quickAdd" data-id="${attr(budget.id)}" style="--cat:${cssColor(budget.color)};--cat-soft:${cssColor(budget.color)}16">
+    <button class="card budget-card ${budget.shared ? "is-shared" : ""}" data-action="quickAdd" data-id="${attr(budget.id)}" style="--cat:${cssColor(budget.color)};--cat-soft:${cssColor(budget.color)}16">
       <div class="budget-top">
         <div class="budget-left">
           <span class="emoji-box">${esc(budget.icon)}</span>
           <div>
-            <div class="budget-name">${esc(budget.label)}</div>
+            <div class="budget-name">${esc(budget.label)}${sharedChip}</div>
             <div class="budget-meta">${remaining >= 0 ? fmt(remaining) + " left" : fmt(Math.abs(remaining)) + " over"}</div>
             ${roll ? `<div class="budget-meta">${esc(roll)}</div>` : ""}
           </div>
@@ -1757,13 +2466,18 @@ function renderLog() {
 function renderLogItem(entry) {
   const cat = categoryById(entry.cat) || {}
   const color = cssColor(cat.color || "#0F766E")
+  const idAttr = entry.shared ? attr(entry.id) : Number(entry.id)
+  const isMine = !entry.shared || (app.cloudUser && entry.createdBy === app.cloudUser.id)
+  const authorInitials = entry.shared && !isMine && entry.createdByEmail
+    ? initialsFromEmail(entry.createdByEmail)
+    : ""
 
   return `
-    <button class="card log-item safe-row" data-action="openEntryEdit" data-id="${Number(entry.id)}">
+    <button class="card log-item safe-row ${entry.shared ? "is-shared" : ""}" data-action="openEntryEdit" data-id="${idAttr}">
       <span class="emoji-box" style="background:${color}16;color:${color}">${esc(cat.icon || "·")}</span>
       <span class="row-copy">
         <span class="row-title clamp-2">${esc(entry.desc || "Expense")}</span>
-        <span class="row-meta clamp-1">${esc(cat.label || entry.cat || "Uncategorized")}</span>
+        <span class="row-meta clamp-1">${esc(cat.label || entry.cat || "Uncategorized")}${authorInitials ? `<span class="author-chip">${esc(authorInitials)}</span>` : ""}</span>
       </span>
       <span class="row-side">
         <span class="row-amount">${fmt(entry.amt)}</span>
@@ -1771,6 +2485,15 @@ function renderLogItem(entry) {
       </span>
     </button>
   `
+}
+
+function initialsFromEmail(email) {
+  const s = String(email || "").trim()
+  if (!s) return ""
+  const local = s.split("@")[0] || s
+  const parts = local.split(/[._-]+/).filter(Boolean)
+  if (parts.length >= 2) return (parts[0][0] + parts[1][0]).toUpperCase()
+  return (local[0] + (local[1] || "")).toUpperCase()
 }
 
 function renderCategories() {
@@ -2689,6 +3412,8 @@ function renderAccount() {
           </div>
         </div>
 
+        ${signedIn ? renderSharedSection() : ""}
+
         ${settingsSection("Library",
           settingsRow({
             action: "go", view: "review",
@@ -2782,6 +3507,50 @@ function renderAccount() {
   `
 }
 
+function renderSharedSection() {
+  const ws = app.shared.workspace
+  const memberCount = app.shared.workspaceMembers.length
+  const sharedBudgetCount = app.shared.budgets.length
+
+  if (!ws) {
+    return settingsSection("Shared",
+      settingsRow({
+        action: "openCreateWorkspace",
+        icon: "users", tint: "acc",
+        title: "Create shared workspace",
+        copy: "Invite a partner or family to share budgets"
+      }),
+      sharedBudgetCount > 0 ? settingsRow({
+        action: "openManageBudgets",
+        icon: "share", tint: "blue",
+        title: `${sharedBudgetCount} shared ${sharedBudgetCount === 1 ? "budget" : "budgets"}`,
+        copy: "Budgets shared individually (not in a workspace)"
+      }) : ""
+    )
+  }
+
+  const roleLabel = ws.myRole === "owner" ? "Owner" : "Member"
+  return settingsSection("Shared",
+    settingsRow({
+      action: "openManageWorkspace",
+      icon: "users", tint: "grn",
+      title: ws.name,
+      copy: `${roleLabel} · ${memberCount} ${memberCount === 1 ? "member" : "members"} · ${sharedBudgetCount} ${sharedBudgetCount === 1 ? "budget" : "budgets"}`
+    }),
+    ws.myRole === "owner" ? settingsRow({
+      action: "createWorkspaceInvite",
+      icon: "link", tint: "blue",
+      title: "Copy invite link",
+      copy: "Anyone with the link can join as Member"
+    }) : settingsRow({
+      action: "confirmLeaveWorkspace",
+      icon: "doorOut", tint: "red",
+      title: "Leave workspace",
+      copy: "Stop seeing shared budgets"
+    })
+  )
+}
+
 function renderThemeSegments() {
   const themes = [
     { key: "auto", label: "Auto", desc: "Match system" },
@@ -2860,6 +3629,285 @@ function renderModal() {
   if (app.modal === "confirm") modalEl.innerHTML = renderConfirmModal()
   if (app.modal === "quickAdd") modalEl.innerHTML = renderQuickAddModal()
   if (app.modal === "cloud") modalEl.innerHTML = renderCloudModal()
+  if (app.modal === "createWorkspace") modalEl.innerHTML = renderCreateWorkspaceModal()
+  if (app.modal === "manageWorkspace") modalEl.innerHTML = renderManageWorkspaceModal()
+  if (app.modal === "shareBudget") modalEl.innerHTML = renderShareBudgetModal()
+  if (app.modal === "acceptInvite") modalEl.innerHTML = renderAcceptInviteModal()
+  if (app.modal === "inviteLink") modalEl.innerHTML = renderInviteLinkModal()
+  if (app.modal === "manageBudgetMembers") modalEl.innerHTML = renderManageBudgetMembersModal()
+  if (app.modal === "sharedBudgetEdit") modalEl.innerHTML = renderSharedBudgetEditModal()
+}
+
+function renderSharedBudgetEditModal() {
+  const budget = sharedBudgetById(app.editingBudgetId)
+  if (!budget) { closeModal(); return "" }
+  const members = budget.workspaceId
+    ? (app.shared.workspaceMembers || [])
+    : (app.shared.budgetMembers[budget.id] || [])
+  const memberCount = members.length
+
+  return `
+    <div class="sheet" role="dialog" aria-modal="true" aria-label="Edit shared budget">
+      <div class="sheet-top">
+        <div class="sheet-title">Edit shared budget</div>
+        <button class="sheet-close" aria-label="Close" data-action="closeModal">${icon("close")}</button>
+      </div>
+      <div class="shared-badge">${icon("users")} Shared · ${memberCount} ${memberCount === 1 ? "member" : "members"}${budget.workspaceId ? ` · ${esc(app.shared.workspace ? app.shared.workspace.name : "")}` : ""}</div>
+      <div class="two-col icon-name-grid">
+        ${iconPickerButton("budgetEdit")}
+        <input class="field" id="budget-edit-label" type="text" placeholder="Name" value="${attr(app.drafts.budgetEdit.label)}">
+      </div>
+      <div class="field-group">
+        <div class="field-label">Monthly limit</div>
+        <input class="field" id="budget-edit-amount" type="number" inputmode="decimal" placeholder="$0.00" value="${attr(app.drafts.budgetEdit.budget)}">
+      </div>
+      <button class="primary-btn" data-action="saveSharedBudgetEdit">${icon("check")} Save budget</button>
+      ${budget.workspaceId
+        ? ""
+        : `<button class="secondary-btn cloud-full" data-action="openBudgetMembers" data-id="${attr(budget.id)}">${icon("users")} Manage members</button>`}
+      <button class="secondary-btn cloud-full" data-action="createBudgetInvite" data-id="${attr(budget.id)}">${icon("link")} Copy invite link</button>
+      <button class="danger-btn cloud-full" data-action="confirmDeleteSharedBudget" data-id="${attr(budget.id)}">${icon("trash")} Delete shared budget</button>
+    </div>
+  `
+}
+
+async function doSaveSharedBudgetEdit() {
+  const budget = sharedBudgetById(app.editingBudgetId)
+  if (!budget) { closeModal(); return }
+  const label = String(app.drafts.budgetEdit.label || "").trim()
+  const monthly = Number(app.drafts.budgetEdit.budget) || 0
+  const iconValue = String(app.drafts.budgetEdit.icon || "").trim() || "🏷️"
+  if (!label || monthly <= 0) {
+    toast("Check the budget details")
+    return
+  }
+  const ok = await sharedUpdateBudget(budget.id, {
+    label,
+    monthly_budget: monthly,
+    icon: iconValue
+  })
+  if (!ok) { haptic("error"); return }
+  closeModal(false)
+  render()
+  haptic("success")
+  toast("Budget updated")
+}
+
+function doConfirmDeleteSharedBudget(budgetId) {
+  const budget = sharedBudgetById(budgetId)
+  if (!budget) return
+  confirmSheet({
+    title: `Delete "${budget.label}"?`,
+    body: "All shared transactions in this budget will be deleted for every member. This cannot be undone.",
+    primaryLabel: "Delete",
+    destructive: true,
+    onConfirm: async () => {
+      const ok = await sharedDeleteBudget(budgetId)
+      if (!ok) { haptic("error"); return }
+      closeModal(false)
+      render()
+      haptic("warning")
+      toast("Shared budget deleted")
+    }
+  })
+}
+
+function renderCreateWorkspaceModal() {
+  const name = app.shareDraft.name || ""
+  return `
+    <div class="sheet share-sheet" role="dialog" aria-modal="true" aria-label="Create shared workspace">
+      <div class="sheet-top">
+        <div class="sheet-title">Create shared workspace</div>
+        <button class="sheet-close" aria-label="Close" data-action="closeModal">${icon("close")}</button>
+      </div>
+      <div class="share-intro">
+        <div class="share-icon">${icon("users")}</div>
+        <p>A workspace lets you share budgets with one or more people. Everyone you invite sees the same budgets and transactions.</p>
+      </div>
+      <div class="field-group">
+        <div class="field-label">Workspace name</div>
+        <input class="field" id="workspace-name" type="text" autocomplete="off" placeholder="Familia, Pareja, Roomies…" value="${attr(name)}" maxlength="40">
+      </div>
+      <button class="primary-btn" id="create-workspace-btn" data-action="createWorkspace" ${name.trim() ? "" : "disabled"}>${icon("check")} Create workspace</button>
+    </div>
+  `
+}
+
+function renderManageWorkspaceModal() {
+  const ws = app.shared.workspace
+  if (!ws) { closeModal(); return "" }
+  const members = app.shared.workspaceMembers || []
+  const isOwner = ws.myRole === "owner"
+
+  return `
+    <div class="sheet share-sheet" role="dialog" aria-modal="true" aria-label="Manage workspace">
+      <div class="sheet-top">
+        <div class="sheet-title">${esc(ws.name)}</div>
+        <button class="sheet-close" aria-label="Close" data-action="closeModal">${icon("close")}</button>
+      </div>
+
+      <div class="share-meta">${esc(isOwner ? "You are the owner" : "You are a member")} · ${members.length} ${members.length === 1 ? "member" : "members"}</div>
+
+      <div class="members-list">
+        ${members.map(m => {
+          const isMe = app.cloudUser && m.user_id === app.cloudUser.id
+          const isWsOwner = m.user_id === ws.ownerId
+          return `
+            <div class="member-row">
+              <span class="member-avatar">${esc(initialsFromEmail(m.display_email || "—"))}</span>
+              <span class="member-main">
+                <span class="member-email clamp-1">${esc(m.display_email || "Unknown")}${isMe ? " · you" : ""}</span>
+                <span class="member-role">${esc(isWsOwner ? "Owner" : "Member")}</span>
+              </span>
+              ${isOwner && !isWsOwner ? `<button class="member-remove" data-action="removeWorkspaceMember" data-id="${attr(m.user_id)}" aria-label="Remove">${icon("close")}</button>` : ""}
+            </div>
+          `
+        }).join("")}
+      </div>
+
+      ${isOwner
+        ? `<button class="primary-btn" data-action="createWorkspaceInvite">${icon("link")} Copy invite link</button>`
+        : `<button class="danger-btn cloud-full" data-action="confirmLeaveWorkspace">${icon("doorOut")} Leave workspace</button>`}
+    </div>
+  `
+}
+
+function renderShareBudgetModal() {
+  const budget = rawCategoryById(app.shareTargetBudgetId)
+  if (!budget) { closeModal(); return "" }
+  const hasWorkspace = !!app.shared.workspace
+  const wsLabel = hasWorkspace ? app.shared.workspace.name : null
+
+  return `
+    <div class="sheet share-sheet" role="dialog" aria-modal="true" aria-label="Share budget">
+      <div class="sheet-top">
+        <div class="sheet-title">Share "${esc(budget.label)}"</div>
+        <button class="sheet-close" aria-label="Close" data-action="closeModal">${icon("close")}</button>
+      </div>
+      <div class="share-intro">
+        <div class="share-icon">${icon("share")}</div>
+        <p>This budget will move to the cloud. You and anyone you invite will see the same transactions in real time on next sync.</p>
+      </div>
+      <div class="share-options">
+        <button class="share-option" data-action="shareLocalToWorkspace" data-id="${attr(budget.id)}">
+          <span class="share-option-icon">${icon("users")}</span>
+          <span class="share-option-main">
+            <span class="share-option-title">${hasWorkspace ? `Add to ${esc(wsLabel)}` : "Create a shared workspace"}</span>
+            <span class="share-option-copy">${hasWorkspace ? "All members of your workspace see this budget" : "Start a new workspace and add this budget"}</span>
+          </span>
+          ${icon("chevron")}
+        </button>
+        <button class="share-option" data-action="shareLocalStandalone" data-id="${attr(budget.id)}">
+          <span class="share-option-icon">${icon("link")}</span>
+          <span class="share-option-main">
+            <span class="share-option-title">Share just this budget</span>
+            <span class="share-option-copy">Send one invite link for this single budget</span>
+          </span>
+          ${icon("chevron")}
+        </button>
+      </div>
+      <div class="share-warn">
+        ${icon("info")}
+        <span>Once shared, this budget needs internet to use. You can convert it back to local later.</span>
+      </div>
+    </div>
+  `
+}
+
+function renderAcceptInviteModal() {
+  const pi = app.shared.pendingInvite
+  if (!pi) { closeModal(); return "" }
+  const targetKind = pi.workspaceId ? "workspace" : "budget"
+  const targetName = pi.workspaceName || pi.budgetLabel || "a shared budget"
+  const inviterEmail = pi.inviterEmail || "Someone"
+  const expiresIn = pi.expiresAt ? expiresInLabel(pi.expiresAt) : ""
+
+  return `
+    <div class="sheet accept-invite-sheet" role="dialog" aria-modal="true" aria-label="Accept invitation">
+      <div class="accept-invite-icon">${icon("users")}</div>
+      <div class="accept-invite-title">${esc(inviterEmail)} invited you</div>
+      <div class="accept-invite-body">to join <strong>${esc(targetName)}</strong>${targetKind === "workspace" ? "" : " (single budget)"} as <strong>${esc(pi.role || "Member")}</strong>.</div>
+      ${expiresIn ? `<div class="accept-invite-meta">Expires ${esc(expiresIn)}</div>` : ""}
+      <div class="confirm-actions">
+        <button class="secondary-btn" data-action="declinePendingInvite">Decline</button>
+        <button class="primary-btn" data-action="acceptPendingInvite">${icon("check")} Join</button>
+      </div>
+    </div>
+  `
+}
+
+function expiresInLabel(iso) {
+  const ms = new Date(iso).getTime() - Date.now()
+  if (ms <= 0) return "just now"
+  const days = Math.round(ms / 86400000)
+  if (days < 1) {
+    const hrs = Math.round(ms / 3600000)
+    return `in ${hrs} ${hrs === 1 ? "hour" : "hours"}`
+  }
+  return `in ${days} ${days === 1 ? "day" : "days"}`
+}
+
+function renderInviteLinkModal() {
+  const url = app.inviteShareLink || ""
+  const contextName = app.inviteShareContextName || "Shared"
+  const expiresIso = app.inviteShareLinkExpiresAt
+  const expiresStr = expiresIso ? expiresInLabel(expiresIso) : "in 14 days"
+
+  return `
+    <div class="sheet share-sheet" role="dialog" aria-modal="true" aria-label="Invite link">
+      <div class="sheet-top">
+        <div class="sheet-title">Invite to ${esc(contextName)}</div>
+        <button class="sheet-close" aria-label="Close" data-action="closeModal">${icon("close")}</button>
+      </div>
+      <div class="share-intro">
+        <div class="share-icon">${icon("link")}</div>
+        <p>Anyone who opens this link in the app and signs in will join as a Member. Link expires ${esc(expiresStr)}.</p>
+      </div>
+      <div class="invite-link-box">
+        <input class="field invite-link-input" id="invite-link-field" type="text" readonly value="${attr(url)}">
+        <button class="primary-btn" data-action="copyInviteLink" data-value="${attr(url)}">${icon("copy")} Copy</button>
+      </div>
+      ${navigator.share ? `<button class="secondary-btn cloud-full" data-action="shareInviteSystem" data-value="${attr(url)}">${icon("share")} Share via…</button>` : ""}
+    </div>
+  `
+}
+
+function renderManageBudgetMembersModal() {
+  const budget = sharedBudgetById(app.shareTargetBudgetId)
+  if (!budget) { closeModal(); return "" }
+  const members = app.shared.budgetMembers[budget.id] || []
+  const isOwner = budget.myRole === "owner"
+
+  return `
+    <div class="sheet share-sheet" role="dialog" aria-modal="true" aria-label="Manage members">
+      <div class="sheet-top">
+        <div class="sheet-title">${esc(budget.label)}</div>
+        <button class="sheet-close" aria-label="Close" data-action="closeModal">${icon("close")}</button>
+      </div>
+      <div class="share-meta">${members.length} ${members.length === 1 ? "member" : "members"}</div>
+
+      <div class="members-list">
+        ${members.map(m => {
+          const isMe = app.cloudUser && m.user_id === app.cloudUser.id
+          const isBudgetOwner = m.user_id === budget.ownerId
+          return `
+            <div class="member-row">
+              <span class="member-avatar">${esc(initialsFromEmail(m.display_email || "—"))}</span>
+              <span class="member-main">
+                <span class="member-email clamp-1">${esc(m.display_email || "Unknown")}${isMe ? " · you" : ""}</span>
+                <span class="member-role">${esc(isBudgetOwner ? "Owner" : "Member")}</span>
+              </span>
+              ${isOwner && !isBudgetOwner ? `<button class="member-remove" data-action="removeBudgetMember" data-id="${attr(m.user_id)}" aria-label="Remove">${icon("close")}</button>` : ""}
+            </div>
+          `
+        }).join("")}
+      </div>
+
+      ${isOwner
+        ? `<button class="primary-btn" data-action="createBudgetInvite" data-id="${attr(budget.id)}">${icon("link")} Copy invite link</button>`
+        : `<button class="danger-btn cloud-full" data-action="confirmLeaveBudget" data-id="${attr(budget.id)}">${icon("doorOut")} Leave budget</button>`}
+    </div>
+  `
 }
 
 function renderCloudModal() {
@@ -2943,17 +3991,38 @@ function chooseQuickCat(id) {
   updateButtonState("save-expense", canSaveExpense())
 }
 
-function saveQuickExpense() {
+async function saveQuickExpense() {
   const amount = Number(app.drafts.add.amt)
   const cat = categoryById(app.selectedCat)
   if (!cat || amount <= 0) return
+
+  const description = app.drafts.add.desc.trim() || cat.label
+
+  if (cat.shared) {
+    const result = await sharedAddTransaction(cat.id, {
+      amount,
+      description,
+      occurredOn: new Date().toISOString().slice(0, 10)
+    })
+    if (!result) {
+      haptic("error")
+      return
+    }
+    app.drafts.add = { amt: "", desc: "" }
+    app.selectedCat = null
+    closeModal(false)
+    render()
+    haptic("success")
+    toast("Logged")
+    return
+  }
 
   if (!Array.isArray(app.data[app.key])) app.data[app.key] = []
   app.data[app.key].push({
     id: Date.now() + Math.floor(Math.random() * 1000),
     cat: cat.id,
     amt: amount,
-    desc: app.drafts.add.desc.trim() || cat.label,
+    desc: description,
     date: todayLabel()
   })
 
@@ -3051,6 +4120,7 @@ function renderBudgetEditModal() {
         <input class="field" id="budget-edit-amount" type="number" inputmode="decimal" placeholder="$0.00" value="${attr(app.drafts.budgetEdit.budget)}">
       </div>
       <button class="primary-btn" data-action="saveEditingBudget">${icon("check")} Save Budget</button>
+      <button class="secondary-btn cloud-full" data-action="openShareBudget" data-id="${attr(budget.id)}">${icon("share")} Share this budget…</button>
       <button class="danger-btn cloud-full" data-action="deleteEditingBudget">${icon("trash")} Delete Budget</button>
     </div>
   `
@@ -3519,6 +4589,11 @@ function handleInput(event) {
     app.iconPickerQuery = target.value
     updateIconPickerResults()
   }
+
+  if (target.id === "workspace-name") {
+    app.shareDraft.name = target.value
+    updateButtonState("create-workspace-btn", !!app.shareDraft.name.trim())
+  }
 }
 
 function handleClick(event) {
@@ -3635,6 +4710,283 @@ function handleClick(event) {
   if (action === "chooseQuickCat") chooseQuickCat(id)
   if (action === "saveQuickExpense") saveQuickExpense()
   if (action === "openCloudSheet") openCloudSheet()
+  if (action === "openCreateWorkspace") openCreateWorkspace()
+  if (action === "createWorkspace") doCreateWorkspace()
+  if (action === "openManageWorkspace") openManageWorkspace()
+  if (action === "createWorkspaceInvite") doCreateWorkspaceInvite()
+  if (action === "createBudgetInvite") doCreateBudgetInvite(id)
+  if (action === "copyInviteLink") doCopyInviteLink(value)
+  if (action === "shareInviteSystem") doShareInviteSystem(value)
+  if (action === "confirmLeaveWorkspace") doConfirmLeaveWorkspace()
+  if (action === "confirmLeaveBudget") doConfirmLeaveBudget(id)
+  if (action === "removeWorkspaceMember") doRemoveWorkspaceMember(id)
+  if (action === "removeBudgetMember") doRemoveBudgetMember(id)
+  if (action === "openShareBudget") openShareBudget(id)
+  if (action === "shareLocalToWorkspace") doShareLocalToWorkspace(id)
+  if (action === "shareLocalStandalone") doShareLocalStandalone(id)
+  if (action === "openBudgetMembers") openBudgetMembers(id)
+  if (action === "acceptPendingInvite") doAcceptPendingInvite()
+  if (action === "declinePendingInvite") doDeclinePendingInvite()
+  if (action === "manualRefresh") manualRefresh()
+  if (action === "saveSharedBudgetEdit") doSaveSharedBudgetEdit()
+  if (action === "confirmDeleteSharedBudget") doConfirmDeleteSharedBudget(id)
+}
+
+function openCreateWorkspace() {
+  app.shareDraft.name = ""
+  haptic("light")
+  app.modal = "createWorkspace"
+  renderModal()
+}
+
+async function doCreateWorkspace() {
+  const name = (app.shareDraft.name || "").trim()
+  if (!name) return
+  const ws = await sharedCreateWorkspace(name)
+  if (!ws) return
+  closeModal(false)
+  render()
+  haptic("success")
+  toast(`Workspace "${name}" created`)
+  // Immediately offer to copy an invite
+  setTimeout(() => doCreateWorkspaceInvite(), 320)
+}
+
+function openManageWorkspace() {
+  if (!app.shared.workspace) return
+  haptic("light")
+  app.modal = "manageWorkspace"
+  renderModal()
+}
+
+async function doCreateWorkspaceInvite() {
+  if (!app.shared.workspace) {
+    toast("Create a workspace first")
+    return
+  }
+  const result = await inviteCreate({ workspaceId: app.shared.workspace.id, role: "member" })
+  if (!result) return
+  app.inviteShareLink = result.url
+  app.inviteShareContextName = app.shared.workspace.name
+  app.inviteShareLinkExpiresAt = result.invite && result.invite.expires_at
+  app.modal = "inviteLink"
+  renderModal()
+  haptic("success")
+}
+
+async function doCreateBudgetInvite(budgetId) {
+  const budget = sharedBudgetById(budgetId)
+  if (!budget) return
+  const result = await inviteCreate({ budgetId, role: "member" })
+  if (!result) return
+  app.inviteShareLink = result.url
+  app.inviteShareContextName = budget.label
+  app.inviteShareLinkExpiresAt = result.invite && result.invite.expires_at
+  app.shareTargetBudgetId = budgetId
+  app.modal = "inviteLink"
+  renderModal()
+  haptic("success")
+}
+
+async function doCopyInviteLink(url) {
+  if (!url) return
+  try {
+    await navigator.clipboard.writeText(url)
+    haptic("success")
+    toast("Link copied")
+  } catch (_) {
+    // Fallback: select the input
+    const field = document.getElementById("invite-link-field")
+    if (field) {
+      field.select()
+      try { document.execCommand("copy") } catch (e) {}
+      haptic("success")
+      toast("Link copied")
+    }
+  }
+}
+
+async function doShareInviteSystem(url) {
+  if (!url || !navigator.share) return
+  try {
+    await navigator.share({
+      title: "Join my shared budget",
+      text: "I'm sharing a budget with you on Budget Tracker.",
+      url
+    })
+  } catch (_) {}
+}
+
+function doConfirmLeaveWorkspace() {
+  if (!app.shared.workspace) return
+  const ws = app.shared.workspace
+  confirmSheet({
+    title: `Leave "${ws.name}"?`,
+    body: "You will stop seeing shared budgets from this workspace.",
+    primaryLabel: "Leave",
+    destructive: true,
+    onConfirm: async () => {
+      const ok = await sharedLeaveWorkspace()
+      if (ok) {
+        render()
+        haptic("warning")
+        toast("Left workspace")
+      }
+    }
+  })
+}
+
+function doConfirmLeaveBudget(budgetId) {
+  const budget = sharedBudgetById(budgetId)
+  if (!budget) return
+  confirmSheet({
+    title: `Leave "${budget.label}"?`,
+    body: "You will stop seeing this budget.",
+    primaryLabel: "Leave",
+    destructive: true,
+    onConfirm: async () => {
+      const ok = await sharedLeaveBudget(budgetId)
+      if (ok) {
+        closeModal(false)
+        render()
+        haptic("warning")
+        toast("Left budget")
+      }
+    }
+  })
+}
+
+function doRemoveWorkspaceMember(userId) {
+  if (!app.shared.workspace) return
+  const ws = app.shared.workspace
+  const member = (app.shared.workspaceMembers || []).find(m => m.user_id === userId)
+  const label = member && member.display_email ? member.display_email : "this member"
+  confirmSheet({
+    title: `Remove ${label}?`,
+    body: "They will lose access to the workspace.",
+    primaryLabel: "Remove",
+    destructive: true,
+    onConfirm: async () => {
+      const ok = await sharedRemoveMember("workspace", ws.id, userId)
+      if (ok) {
+        render()
+        haptic("warning")
+        toast("Member removed")
+      }
+    }
+  })
+}
+
+function doRemoveBudgetMember(userId) {
+  const budget = sharedBudgetById(app.shareTargetBudgetId)
+  if (!budget) return
+  const member = (app.shared.budgetMembers[budget.id] || []).find(m => m.user_id === userId)
+  const label = member && member.display_email ? member.display_email : "this member"
+  confirmSheet({
+    title: `Remove ${label}?`,
+    body: "They will lose access to this budget.",
+    primaryLabel: "Remove",
+    destructive: true,
+    onConfirm: async () => {
+      const ok = await sharedRemoveMember("budget", budget.id, userId)
+      if (ok) {
+        render()
+        haptic("warning")
+        toast("Member removed")
+      }
+    }
+  })
+}
+
+function openShareBudget(localBudgetId) {
+  const budget = rawCategoryById(localBudgetId)
+  if (!budget) return
+  if (!supabaseClient || !app.cloudUser) {
+    toast("Sign in first to share")
+    app.view = "account"
+    render()
+    return
+  }
+  app.shareTargetBudgetId = localBudgetId
+  app.shareTargetIsWorkspace = false
+  haptic("light")
+  app.modal = "shareBudget"
+  renderModal()
+}
+
+async function doShareLocalToWorkspace(localBudgetId) {
+  const budget = rawCategoryById(localBudgetId)
+  if (!budget) return
+
+  const proceed = async () => {
+    const sharedBudget = await sharedConvertLocalBudget(localBudgetId, {
+      target: "workspace",
+      workspaceName: app.shared.workspace ? app.shared.workspace.name : "Shared"
+    })
+    if (!sharedBudget) { haptic("error"); return }
+    closeModal(false)
+    render()
+    haptic("success")
+    toast(`"${budget.label}" is now shared`)
+  }
+
+  confirmSheet({
+    title: `Move "${budget.label}" to shared workspace?`,
+    body: app.shared.workspace
+      ? `This budget and its transactions will join "${app.shared.workspace.name}" in the cloud. Members can see and add transactions.`
+      : "We'll create a new workspace for you, then add this budget to it.",
+    primaryLabel: "Share",
+    destructive: false,
+    onConfirm: proceed
+  })
+}
+
+async function doShareLocalStandalone(localBudgetId) {
+  const budget = rawCategoryById(localBudgetId)
+  if (!budget) return
+
+  confirmSheet({
+    title: `Share just "${budget.label}"?`,
+    body: "This single budget moves to the cloud. You'll get a link to invite one or more people.",
+    primaryLabel: "Share",
+    destructive: false,
+    onConfirm: async () => {
+      const sharedBudget = await sharedConvertLocalBudget(localBudgetId, { target: "standalone" })
+      if (!sharedBudget) { haptic("error"); return }
+      closeModal(false)
+      haptic("success")
+      toast(`"${budget.label}" is now shared`)
+      // Immediately offer the invite link
+      app.shareTargetBudgetId = sharedBudget.id
+      setTimeout(() => doCreateBudgetInvite(sharedBudget.id), 320)
+    }
+  })
+}
+
+function openBudgetMembers(budgetId) {
+  if (!sharedBudgetById(budgetId)) return
+  app.shareTargetBudgetId = budgetId
+  haptic("light")
+  app.modal = "manageBudgetMembers"
+  renderModal()
+}
+
+async function doAcceptPendingInvite() {
+  const pi = app.shared.pendingInvite
+  if (!pi) return
+  const result = await inviteAccept(pi.token)
+  if (!result) { haptic("error"); return }
+  app.shared.pendingInvite = null
+  closeModal(false)
+  render()
+  haptic("success")
+  toast(`Joined ${pi.workspaceName || pi.budgetLabel || "shared budget"}`)
+}
+
+function doDeclinePendingInvite() {
+  app.shared.pendingInvite = null
+  closeModal()
+  toast("Invitation dismissed")
 }
 
 function go(view) {
@@ -4322,17 +5674,35 @@ function chooseIcon(value) {
   else render()
 }
 
-function saveExpense() {
+async function saveExpense() {
   const amount = Number(app.drafts.add.amt)
   const cat = categoryById(app.selectedCat)
   if (!cat || amount <= 0) return
+
+  const description = app.drafts.add.desc.trim() || cat.label
+
+  if (cat.shared) {
+    const result = await sharedAddTransaction(cat.id, {
+      amount,
+      description,
+      occurredOn: new Date().toISOString().slice(0, 10)
+    })
+    if (!result) { haptic("error"); return }
+    app.drafts.add = { amt: "", desc: "" }
+    app.selectedCat = null
+    app.view = "home"
+    render()
+    haptic("success")
+    toast("Saved")
+    return
+  }
 
   if (!Array.isArray(app.data[app.key])) app.data[app.key] = []
   app.data[app.key].push({
     id: Date.now() + Math.floor(Math.random() * 1000),
     cat: cat.id,
     amt: amount,
-    desc: app.drafts.add.desc.trim() || cat.label,
+    desc: description,
     date: todayLabel()
   })
 
@@ -4394,15 +5764,36 @@ function saveCategoryBudget(id) {
 }
 
 function openBudgetEdit(id) {
-  const budget = rawCategoryById(id)
-  if (!budget) return
-  app.editingBudgetId = budget.id
-  app.drafts.budgetEdit = {
-    icon: budget.icon || "🏷️",
-    label: budget.label || "",
-    budget: String(Number(budget.budget) || "")
+  // Local budget?
+  const localBudget = rawCategoryById(id)
+  if (localBudget) {
+    app.editingBudgetId = localBudget.id
+    app.editingBudgetShared = false
+    app.drafts.budgetEdit = {
+      icon: localBudget.icon || "🏷️",
+      label: localBudget.label || "",
+      budget: String(Number(localBudget.budget) || "")
+    }
+    openModal("budgetEdit")
+    return
   }
-  openModal("budgetEdit")
+  // Shared budget?
+  const sharedBudget = sharedBudgetById(id)
+  if (sharedBudget) {
+    app.editingBudgetId = sharedBudget.id
+    app.editingBudgetShared = true
+    if (sharedBudget.myRole === "owner") {
+      app.drafts.budgetEdit = {
+        icon: sharedBudget.icon || "🏷️",
+        label: sharedBudget.label || "",
+        budget: String(Number(sharedBudget.budget) || "")
+      }
+      openModal("sharedBudgetEdit")
+    } else {
+      // Members go straight to the members view
+      openBudgetMembers(sharedBudget.id)
+    }
+  }
 }
 
 function saveEditingBudget() {
@@ -4752,7 +6143,9 @@ function openEntryEdit(id) {
   const entry = entryById(id)
   if (!entry) return
   haptic("light")
-  app.editingEntryId = Number(entry.id)
+  // Shared entries use UUID strings; local use numbers. Store as-is.
+  app.editingEntryId = entry.shared ? String(entry.id) : Number(entry.id)
+  app.editingEntryShared = !!entry.shared
   app.editingCat = entry.cat
   app.drafts.edit = {
     desc: entry.desc || "",
@@ -4767,15 +6160,36 @@ function pickEditCat(id) {
   renderModal()
 }
 
-function saveEditingEntry() {
+async function saveEditingEntry() {
   const entry = entryById(app.editingEntryId)
   const amount = Number(app.drafts.edit.amt)
   if (!entry || !app.editingCat || amount <= 0) {
     toast("Check amount and category")
     return
   }
+  const description = app.drafts.edit.desc.trim() || "Expense"
 
-  entry.desc = app.drafts.edit.desc.trim() || "Expense"
+  if (entry.shared) {
+    // Shared transactions: recategorizing across budgets isn't supported in v1 because
+    // the budget is determined by the row's budget_id. So we only support edit-in-place.
+    if (app.editingCat !== entry.cat) {
+      toast("Moving shared transactions across budgets is not supported")
+      return
+    }
+    const ok = await sharedUpdateTransaction(entry.id, {
+      amount,
+      description,
+      occurredOn: entry.occurredOn || new Date().toISOString().slice(0, 10)
+    })
+    if (!ok) { haptic("error"); return }
+    closeModal(false)
+    render()
+    haptic("success")
+    toast("Expense updated")
+    return
+  }
+
+  entry.desc = description
   entry.amt = amount
   entry.cat = app.editingCat
   closeModal(false)
@@ -4785,7 +6199,7 @@ function saveEditingEntry() {
   toast("Expense updated")
 }
 
-function deleteEntry(id, options = {}) {
+async function deleteEntry(id, options = {}) {
   const entry = entryById(id)
   if (!entry) return
 
@@ -4797,6 +6211,15 @@ function deleteEntry(id, options = {}) {
       destructive: true,
       onConfirm: () => deleteEntry(id, { confirmed: true })
     })
+    return
+  }
+
+  if (entry.shared) {
+    const ok = await sharedDeleteTransaction(entry.id)
+    if (!ok) { haptic("error"); return }
+    render()
+    haptic("warning")
+    toast(`Deleted "${entry.desc || "Expense"}"`)
     return
   }
 
