@@ -1,5 +1,5 @@
 const STORAGE_KEY = "budget_tracker_pwa_v1"
-const APP_VERSION = "35"
+const APP_VERSION = "36"
 const ROLLOVER_START_KEY = "2026-4"
 const REVIEW_REQUIRED_MONTHS = 4
 const REVIEW_HANDOFF_URL = `https://ezratawachi.github.io/scriptable-budget-tracker/pwa/?v=${APP_VERSION}&review=1`
@@ -6732,9 +6732,19 @@ async function saveEditingEntry() {
     return
   }
 
-  entry.desc = description
-  entry.amt = amount
-  entry.cat = app.editingCat
+  // The `entry` from entryById is the state-shaped copy (calcState rebuilds
+  // app.state.entries every render). Mutating it doesn't persist. Find the
+  // RAW entry on app.data[app.key] and mutate that one.
+  const rawList = Array.isArray(app.data[app.key]) ? app.data[app.key] : []
+  const targetId = String(entry.id)
+  const rawEntry = rawList.find(e => String(e.id) === targetId)
+  if (!rawEntry) {
+    toast("Could not find this expense")
+    return
+  }
+  rawEntry.desc = description
+  rawEntry.amt = amount
+  rawEntry.cat = app.editingCat
   closeModal(false)
   saveData(app.data)
   render()
