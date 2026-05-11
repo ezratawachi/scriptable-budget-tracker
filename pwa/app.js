@@ -1,5 +1,5 @@
 const STORAGE_KEY = "budget_tracker_pwa_v1"
-const APP_VERSION = "30"
+const APP_VERSION = "31"
 const ROLLOVER_START_KEY = "2026-4"
 const REVIEW_REQUIRED_MONTHS = 4
 const REVIEW_HANDOFF_URL = `https://ezratawachi.github.io/scriptable-budget-tracker/pwa/?v=${APP_VERSION}&review=1`
@@ -946,6 +946,20 @@ function previousMonthKey(key) {
   return `${date.getFullYear()}-${date.getMonth()}`
 }
 
+// Convert a local entry (with monthKey and short "May 10"-style date string)
+// into a real YYYY-MM-DD ISO date. Falls back to first-of-month, then today.
+function localEntryToISODate(entry, monthKey) {
+  const parsed = parseMonthKey(monthKey)
+  if (!parsed) return new Date().toISOString().slice(0, 10)
+  const dayMatch = String((entry && entry.date) || "").match(/\d+/)
+  let day = dayMatch ? parseInt(dayMatch[0], 10) : 1
+  if (!Number.isFinite(day) || day < 1 || day > 31) day = 1
+  const yyyy = parsed.year
+  const mm = String(parsed.month + 1).padStart(2, "0")
+  const dd = String(day).padStart(2, "0")
+  return `${yyyy}-${mm}-${dd}`
+}
+
 function randomInviteToken() {
   const bytes = new Uint8Array(12)
   crypto.getRandomValues(bytes)
@@ -1398,7 +1412,7 @@ async function sharedConvertLocalBudget(localBudgetId, options = {}) {
     if (key === "_settings" || !Array.isArray(app.data[key]) || !parseMonthKey(key)) return
     app.data[key].forEach(entry => {
       if (entry.cat !== localBudgetId) return
-      const occurredISO = entry.dateISO || new Date().toISOString().slice(0, 10)
+      const occurredISO = localEntryToISODate(entry, key)
       txInserts.push({
         budget_id: sharedBudget.id,
         created_by: app.cloudUser.id,
