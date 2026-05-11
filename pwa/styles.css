@@ -1422,6 +1422,182 @@ input:focus-visible{
   --stroke:2;
 }
 
+/* Export sheet — filters + format pickers */
+
+.export-sheet{
+  display:flex;
+  flex-direction:column;
+  gap:18px;
+  padding:6px 18px 20px;
+  max-height:90vh;
+}
+
+.export-section{
+  display:flex;
+  flex-direction:column;
+  gap:9px;
+}
+
+.export-section-head{
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  gap:10px;
+}
+
+.export-section-label{
+  color:var(--soft);
+  font-size:11px;
+  font-weight:800;
+  letter-spacing:.08em;
+  text-transform:uppercase;
+}
+
+.export-section-action{
+  background:transparent;
+  border:none;
+  color:var(--acc);
+  font-size:12.5px;
+  font-weight:800;
+  letter-spacing:-.005em;
+  padding:4px 6px;
+}
+
+.export-segments{
+  display:grid;
+  grid-auto-flow:column;
+  grid-auto-columns:1fr;
+  gap:5px;
+  padding:5px;
+  border:.5px solid var(--bord);
+  border-radius:var(--r-lg);
+  background:var(--card2);
+}
+
+.export-segments .export-chip{
+  min-height:38px;
+  padding:6px 10px;
+  border-radius:var(--r-md);
+  border:.5px solid transparent;
+  background:transparent;
+  color:var(--mut);
+  font-size:13px;
+  font-weight:800;
+  letter-spacing:-.005em;
+  display:inline-flex;
+  align-items:center;
+  justify-content:center;
+  gap:6px;
+}
+
+.export-segments .export-chip .ui-icon{
+  width:15px;
+  height:15px;
+}
+
+.export-segments .export-chip.active{
+  background:var(--card);
+  color:var(--txt);
+  border-color:var(--bord);
+  box-shadow:var(--shadow-xs);
+}
+
+.export-chips-row{
+  display:flex;
+  flex-wrap:wrap;
+  gap:6px;
+}
+
+.export-chip{
+  min-height:34px;
+  padding:7px 14px;
+  border-radius:var(--r-pill);
+  border:.5px solid var(--bord);
+  background:var(--card);
+  color:var(--mut);
+  font-size:12.5px;
+  font-weight:700;
+  letter-spacing:-.005em;
+  transition:background var(--dur-fast) var(--ease-out),color var(--dur-fast) var(--ease-out),border-color var(--dur-fast) var(--ease-out),transform var(--dur-fast) var(--ease-out);
+}
+
+.export-chip:active{ transform:scale(.96); }
+
+.export-chips-row .export-chip.active,
+.export-budgets .export-budget-chip.active{
+  background:var(--acc);
+  color:#FFFFFF;
+  border-color:var(--acc);
+}
+
+[data-theme="dark"] .export-chips-row .export-chip.active,
+[data-theme="dark"] .export-budgets .export-budget-chip.active{
+  color:#06231C;
+}
+
+.export-budgets{
+  display:flex;
+  flex-wrap:wrap;
+  gap:6px;
+  max-height:200px;
+  overflow-y:auto;
+  padding:2px;
+  -webkit-overflow-scrolling:touch;
+}
+
+.export-budget-chip{
+  display:inline-flex;
+  align-items:center;
+  gap:7px;
+  min-height:36px;
+  padding:5px 14px 5px 6px;
+  border-radius:var(--r-pill);
+  border:.5px solid var(--bord);
+  background:var(--card);
+  color:var(--txt);
+  font-size:12.5px;
+  font-weight:700;
+  letter-spacing:-.005em;
+  transition:background var(--dur-fast) var(--ease-out),color var(--dur-fast) var(--ease-out),border-color var(--dur-fast) var(--ease-out),transform var(--dur-fast) var(--ease-out);
+}
+
+.export-budget-chip:active{ transform:scale(.96); }
+
+.export-budget-chip.active{
+  background:var(--cat,var(--acc));
+  color:#FFFFFF;
+  border-color:var(--cat,var(--acc));
+}
+
+[data-theme="dark"] .export-budget-chip.active{ color:#0B1716; }
+
+.export-budget-emoji{
+  width:24px;
+  height:24px;
+  display:inline-flex;
+  align-items:center;
+  justify-content:center;
+  border-radius:8px;
+  background:var(--cat-soft,var(--card2));
+  color:var(--cat,inherit);
+  font-size:14px;
+  line-height:1;
+  flex-shrink:0;
+}
+
+.export-budget-chip.active .export-budget-emoji{
+  background:rgba(255,255,255,.22);
+  color:inherit;
+}
+
+.export-budget-name{
+  max-width:160px;
+}
+
+.export-go{
+  margin-top:4px;
+}
+
 /* Type-the-name confirmation */
 
 .confirm-by-name-sheet{

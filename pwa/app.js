@@ -1,5 +1,5 @@
 const STORAGE_KEY = "budget_tracker_pwa_v1"
-const APP_VERSION = "33"
+const APP_VERSION = "34"
 const ROLLOVER_START_KEY = "2026-4"
 const REVIEW_REQUIRED_MONTHS = 4
 const REVIEW_HANDOFF_URL = `https://ezratawachi.github.io/scriptable-budget-tracker/pwa/?v=${APP_VERSION}&review=1`
@@ -74,6 +74,7 @@ const app = {
   inviteEmailDraft: "",
   inviteEmailScope: null,
   confirmDeleteCtx: null,
+  exportDraft: null,
   shareDraft: { name: "" },
   shareTargetBudgetId: null,
   shareTargetIsWorkspace: false,
@@ -2023,7 +2024,8 @@ const ICON_PATHS = {
   link: '<path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/>',
   refresh: '<path d="M3 12a9 9 0 0 1 15-6.7L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-15 6.7L3 16"/><path d="M3 21v-5h5"/>',
   copy: '<rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>',
-  doorOut: '<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><path d="M16 17l5-5-5-5"/><path d="M21 12H9"/>'
+  doorOut: '<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><path d="M16 17l5-5-5-5"/><path d="M21 12H9"/>',
+  spreadsheet: '<rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18"/><path d="M3 15h18"/><path d="M9 3v18"/><path d="M15 3v18"/>'
 }
 
 const ICON_PICKER_GROUPS = [
@@ -3662,22 +3664,10 @@ function renderAccount() {
             copy: cloudSubtitle
           }),
           settingsRow({
-            action: "exportJSON",
-            icon: "download", tint: "mut",
-            title: "Export full JSON",
-            copy: `${esc(monthsLabel)} of data`
-          }),
-          settingsRow({
-            action: "exportCSV",
-            icon: "download", tint: "mut",
-            title: "Export this month as CSV",
-            copy: monthLabel(app.key)
-          }),
-          settingsRow({
-            action: "importJSON",
-            icon: "upload", tint: "red",
-            title: "Import JSON",
-            copy: "Replace local data from a backup"
+            action: "openExport",
+            icon: "spreadsheet", tint: "blue",
+            title: "Export data",
+            copy: "Pick range, type, budgets — CSV or Excel"
           })
         )}
 
@@ -3845,6 +3835,81 @@ function renderModal() {
   if (app.modal === "inviteByEmail") modalEl.innerHTML = renderInviteByEmailModal()
   if (app.modal === "pendingInvites") modalEl.innerHTML = renderPendingInvitesModal()
   if (app.modal === "confirmDeleteByName") modalEl.innerHTML = renderConfirmDeleteByNameModal()
+  if (app.modal === "export") modalEl.innerHTML = renderExportModal()
+}
+
+function renderExportModal() {
+  const d = app.exportDraft || defaultExportDraft()
+  const allBudgets = allKnownBudgetsForExport()
+  const isAllSelected = d.selectedBudgetIds === null
+  const isBudgetSelected = id => isAllSelected || (d.selectedBudgetIds && d.selectedBudgetIds.has(id))
+  const selectedCount = isAllSelected ? allBudgets.length : (d.selectedBudgetIds ? d.selectedBudgetIds.size : 0)
+
+  const ranges = [
+    ["thisMonth", "This month"],
+    ["last3", "Last 3 months"],
+    ["last6", "Last 6 months"],
+    ["thisYear", "This year"],
+    ["all", "All time"]
+  ]
+
+  return `
+    <div class="sheet export-sheet" role="dialog" aria-modal="true" aria-label="Export data">
+      <div class="sheet-top">
+        <div class="sheet-title">Export data</div>
+        <button class="sheet-close" aria-label="Close" data-action="closeModal">${icon("close")}</button>
+      </div>
+
+      <div class="export-section">
+        <div class="export-section-label">Format</div>
+        <div class="export-segments">
+          <button class="export-chip ${d.format === "excel" ? "active" : ""}" data-action="setExportFormat" data-value="excel">${icon("spreadsheet")} Excel</button>
+          <button class="export-chip ${d.format === "csv" ? "active" : ""}" data-action="setExportFormat" data-value="csv">${icon("file")} CSV</button>
+        </div>
+      </div>
+
+      <div class="export-section">
+        <div class="export-section-label">Date range</div>
+        <div class="export-chips-row">
+          ${ranges.map(([k, l]) => `
+            <button class="export-chip ${d.range === k ? "active" : ""}" data-action="setExportRange" data-value="${k}">${esc(l)}</button>
+          `).join("")}
+        </div>
+      </div>
+
+      <div class="export-section">
+        <div class="export-section-label">Type</div>
+        <div class="export-segments">
+          <button class="export-chip ${d.type === "all" ? "active" : ""}" data-action="setExportType" data-value="all">All</button>
+          <button class="export-chip ${d.type === "private" ? "active" : ""}" data-action="setExportType" data-value="private">Private</button>
+          <button class="export-chip ${d.type === "shared" ? "active" : ""}" data-action="setExportType" data-value="shared">Shared</button>
+        </div>
+      </div>
+
+      ${allBudgets.length ? `
+        <div class="export-section">
+          <div class="export-section-head">
+            <div class="export-section-label">Budgets · ${selectedCount}/${allBudgets.length}</div>
+            <button class="export-section-action" data-action="toggleAllExportBudgets">${isAllSelected ? "Clear all" : "Select all"}</button>
+          </div>
+          <div class="export-budgets">
+            ${allBudgets.map(b => {
+              const selected = isBudgetSelected(b.id)
+              const color = cssColor(b.color)
+              return `
+                <button class="export-budget-chip ${selected ? "active" : ""}" data-action="toggleExportBudget" data-id="${attr(b.id)}" style="--cat:${color};--cat-soft:${color}1A">
+                  <span class="export-budget-emoji">${esc(b.icon || "·")}</span>
+                  <span class="export-budget-name clamp-1">${esc(b.label)}</span>
+                </button>
+              `
+            }).join("")}
+          </div>
+        </div>
+      ` : ""}
+
+      <button class="primary-btn export-go" data-action="runExport">${icon("download")} Export</button>
+    </div>
+  `
 }
 
 function renderConfirmDeleteByNameModal() {
@@ -5017,9 +5082,13 @@ function handleClick(event) {
   if (action === "saveEditingWish") saveEditingWish()
   if (action === "deleteEditingWish") deleteEditingWish()
   if (action === "buyEditingWish") buyEditingWish()
-  if (action === "exportJSON") exportJSON()
-  if (action === "exportCSV") exportCSV()
-  if (action === "importJSON") importJSON()
+  if (action === "openExport") openExport()
+  if (action === "setExportFormat") setExportFormat(value)
+  if (action === "setExportRange") setExportRange(value)
+  if (action === "setExportType") setExportType(value)
+  if (action === "toggleAllExportBudgets") toggleAllExportBudgets()
+  if (action === "toggleExportBudget") toggleExportBudget(id)
+  if (action === "runExport") runExport()
   if (action === "openStory") openMethodIntro({ mode: "read" })
   if (action === "openMethod") openMethod(target.dataset.step)
   if (action === "openInstallCoach") openInstallCoach()
@@ -6738,31 +6807,6 @@ function saveEditingAsPreset() {
   toast("Preset created")
 }
 
-function exportJSON() {
-  downloadFile("budget_export.json", JSON.stringify(ensureDataShape(app.data), null, 2), "application/json")
-  haptic("success")
-  toast("JSON exported")
-}
-
-function exportCSV() {
-  const budgets = app.data._settings.budgets
-  const labels = {}
-  budgets.forEach(b => { labels[b.id] = b.label })
-  const lines = ["Date,Category,Description,Amount"]
-  ;(app.data[app.key] || []).forEach(entry => {
-    lines.push([
-      csvEscape(entry.date || ""),
-      csvEscape(labels[entry.cat] || entry.cat || ""),
-      csvEscape(entry.desc || ""),
-      (Number(entry.amt) || 0).toFixed(2)
-    ].join(","))
-  })
-
-  downloadFile(`budget_${app.key}.csv`, lines.join("\n"), "text/csv")
-  haptic("success")
-  toast("CSV exported")
-}
-
 function csvEscape(value) {
   const s = value === undefined || value === null ? "" : String(value)
   return /[",\n\r]/.test(s) ? "\"" + s.replace(/"/g, "\"\"") + "\"" : s
@@ -6770,6 +6814,10 @@ function csvEscape(value) {
 
 function downloadFile(filename, content, type) {
   const blob = new Blob([content], { type })
+  downloadBlob(filename, blob)
+}
+
+function downloadBlob(filename, blob) {
   const url = URL.createObjectURL(blob)
   const link = document.createElement("a")
   link.href = url
@@ -6777,45 +6825,384 @@ function downloadFile(filename, content, type) {
   document.body.appendChild(link)
   link.click()
   link.remove()
-  URL.revokeObjectURL(url)
+  setTimeout(() => URL.revokeObjectURL(url), 1500)
 }
 
-function importJSON() {
-  const input = document.createElement("input")
-  input.type = "file"
-  input.accept = "application/json,.json"
-  input.addEventListener("change", async () => {
-    const file = input.files && input.files[0]
-    if (!file) return
+function todayISODate() {
+  return new Date().toISOString().slice(0, 10)
+}
 
-    try {
-      const text = await file.text()
-      const parsed = JSON.parse(text)
-      const shaped = ensureDataShape(parsed)
-      const monthKeys = Object.keys(shaped).filter(k => k !== "_settings" && parseMonthKey(k))
-      const txCount = monthKeys.reduce((sum, key) => sum + (Array.isArray(shaped[key]) ? shaped[key].length : 0), 0)
-      const body = `${shaped._settings.budgets.length} budgets, ${monthKeys.length} months, and ${txCount} transactions will replace your current data.`
+// ============================================================
+// Export — modal flow with format/range/type/budget filters
+// ============================================================
 
-      confirmSheet({
-        title: "Replace local data?",
-        body,
-        primaryLabel: "Replace",
-        destructive: true,
-        onConfirm: () => {
-          app.data = shaped
-          markActiveMonth(app.data, app.key)
-          saveData(app.data)
-          closeModal(false)
-          render()
-          haptic("success")
-          toast("Data imported")
-        }
-      })
-    } catch (error) {
-      toast("Invalid JSON")
+function defaultExportDraft() {
+  return {
+    format: "excel",
+    range: "thisMonth",
+    type: "all",
+    selectedBudgetIds: null  // null = all selected
+  }
+}
+
+function allKnownBudgetsForExport() {
+  const local = (app.data._settings.budgets || []).map(b => ({
+    id: b.id,
+    label: b.label,
+    icon: b.icon || "🏷️",
+    color: b.color || "#0F766E",
+    shared: false
+  }))
+  const shared = (app.shared.budgets || []).map(b => ({
+    id: b.id,
+    label: b.label,
+    icon: b.icon || "🏷️",
+    color: b.color || "#0F766E",
+    shared: true
+  }))
+  return [...local, ...shared]
+}
+
+function monthsInRange(range) {
+  const now = new Date()
+  const curY = now.getFullYear()
+  const curM0 = now.getMonth()
+  const key = (y, m0) => `${y}-${m0}`
+  const back = n => {
+    const out = []
+    let y = curY, m = curM0
+    for (let i = 0; i < n; i++) {
+      out.push(key(y, m))
+      m -= 1
+      if (m < 0) { m = 11; y -= 1 }
     }
+    return out
+  }
+  switch (range) {
+    case "thisMonth": return back(1)
+    case "last3": return back(3)
+    case "last6": return back(6)
+    case "thisYear": {
+      const out = []
+      for (let m = 0; m <= curM0; m++) out.push(key(curY, m))
+      return out
+    }
+    case "all": return null
+    default: return back(1)
+  }
+}
+
+async function buildExportRows(filter) {
+  const rangeMonths = monthsInRange(filter.range)
+  const typeFilter = filter.type
+  const selected = filter.selectedBudgetIds  // null = all, else Set
+
+  const rows = []
+
+  // ----- Private (local) -----
+  if (typeFilter === "all" || typeFilter === "private") {
+    Object.keys(app.data).forEach(key => {
+      if (key === "_settings" || !parseMonthKey(key)) return
+      if (!Array.isArray(app.data[key])) return
+      if (rangeMonths && !rangeMonths.includes(key)) return
+      app.data[key].forEach(entry => {
+        if (selected && !selected.has(entry.cat)) return
+        const cat = rawCategoryById(entry.cat) || { label: entry.cat || "Uncategorized", icon: "" }
+        rows.push({
+          date: localEntryToISODate(entry, key),
+          month: monthLabel(key),
+          budget: cat.label,
+          description: entry.desc || "",
+          amount: Number(entry.amt) || 0,
+          type: "Private",
+          author: app.cloudEmail || ""
+        })
+      })
+    })
+  }
+
+  // ----- Shared (workspace + standalone) -----
+  if ((typeFilter === "all" || typeFilter === "shared") && supabaseClient && app.cloudUser) {
+    const sharedBudgets = (app.shared.budgets || []).filter(b => !selected || selected.has(b.id))
+    const ids = sharedBudgets.map(b => b.id)
+    if (ids.length) {
+      let query = supabaseClient
+        .from("shared_transactions")
+        .select("*")
+        .in("budget_id", ids)
+        .is("deleted_at", null)
+      if (rangeMonths) query = query.in("month_key", rangeMonths)
+      const { data: txs, error } = await query
+      if (!error && Array.isArray(txs)) {
+        const budgetById = {}
+        sharedBudgets.forEach(b => { budgetById[b.id] = b })
+        for (const tx of txs) {
+          const b = budgetById[tx.budget_id]
+          if (!b) continue
+          rows.push({
+            date: tx.occurred_on,
+            month: monthLabel(tx.month_key),
+            budget: b.label,
+            description: tx.description || "",
+            amount: Number(tx.amount) || 0,
+            type: b.workspaceId ? "Shared (workspace)" : "Shared",
+            author: tx.created_by_email || ""
+          })
+        }
+      }
+    }
+  }
+
+  rows.sort((a, b) => (b.date || "").localeCompare(a.date || ""))
+  return rows
+}
+
+function openExport() {
+  app.exportDraft = defaultExportDraft()
+  haptic("light")
+  app.modal = "export"
+  renderModal()
+}
+
+function setExportFormat(value) {
+  if (!app.exportDraft) return
+  app.exportDraft.format = value === "csv" ? "csv" : "excel"
+  haptic("selection")
+  renderModal()
+}
+
+function setExportRange(value) {
+  if (!app.exportDraft) return
+  app.exportDraft.range = value
+  haptic("selection")
+  renderModal()
+}
+
+function setExportType(value) {
+  if (!app.exportDraft) return
+  app.exportDraft.type = value
+  haptic("selection")
+  renderModal()
+}
+
+function toggleAllExportBudgets() {
+  if (!app.exportDraft) return
+  if (app.exportDraft.selectedBudgetIds === null) {
+    app.exportDraft.selectedBudgetIds = new Set()  // none selected
+  } else {
+    app.exportDraft.selectedBudgetIds = null  // all selected
+  }
+  haptic("light")
+  renderModal()
+}
+
+function toggleExportBudget(id) {
+  if (!app.exportDraft) return
+  if (app.exportDraft.selectedBudgetIds === null) {
+    const ids = new Set(allKnownBudgetsForExport().map(b => b.id))
+    ids.delete(id)
+    app.exportDraft.selectedBudgetIds = ids
+  } else {
+    if (app.exportDraft.selectedBudgetIds.has(id)) {
+      app.exportDraft.selectedBudgetIds.delete(id)
+    } else {
+      app.exportDraft.selectedBudgetIds.add(id)
+    }
+  }
+  haptic("selection")
+  renderModal()
+}
+
+async function runExport() {
+  const d = app.exportDraft || defaultExportDraft()
+  toast("Preparing export…")
+  try {
+    const rows = await buildExportRows({
+      range: d.range,
+      type: d.type,
+      selectedBudgetIds: d.selectedBudgetIds
+    })
+    if (!rows.length) {
+      haptic("warning")
+      toast("No transactions match these filters")
+      return
+    }
+    const stamp = todayISODate()
+    if (d.format === "csv") {
+      writeExportCSV(`budget-${stamp}.csv`, rows)
+      haptic("success")
+      toast(`${rows.length} ${rows.length === 1 ? "row" : "rows"} exported`)
+      closeModal(false)
+    } else {
+      await writeExportExcel(`budget-${stamp}.xlsx`, rows, d)
+      haptic("success")
+      toast(`${rows.length} ${rows.length === 1 ? "row" : "rows"} exported`)
+      closeModal(false)
+    }
+  } catch (err) {
+    console.error("Export failed", err)
+    haptic("error")
+    toast("Export failed")
+  }
+}
+
+function writeExportCSV(filename, rows) {
+  const headers = ["Date", "Month", "Budget", "Description", "Amount", "Type", "Author"]
+  const lines = [headers.join(",")]
+  for (const r of rows) {
+    lines.push([
+      r.date || "",
+      csvEscape(r.month || ""),
+      csvEscape(r.budget || ""),
+      csvEscape(r.description || ""),
+      (Number(r.amount) || 0).toFixed(2),
+      csvEscape(r.type || ""),
+      csvEscape(r.author || "")
+    ].join(","))
+  }
+  // UTF-8 BOM so Excel opens accented chars / emoji correctly
+  downloadFile(filename, "﻿" + lines.join("\n"), "text/csv;charset=utf-8")
+}
+
+let xlsxStyleLoading = null
+function loadXlsxStyle() {
+  if (window.XLSX && window.XLSX.write) return Promise.resolve(window.XLSX)
+  if (xlsxStyleLoading) return xlsxStyleLoading
+  xlsxStyleLoading = new Promise((resolve, reject) => {
+    const script = document.createElement("script")
+    script.src = "https://cdn.jsdelivr.net/npm/xlsx-js-style@1.2.0/dist/xlsx.bundle.js"
+    script.async = true
+    script.onload = () => {
+      if (window.XLSX && window.XLSX.write) resolve(window.XLSX)
+      else reject(new Error("xlsx-js-style loaded but XLSX not found"))
+    }
+    script.onerror = () => reject(new Error("Could not load xlsx-js-style"))
+    document.head.appendChild(script)
   })
-  input.click()
+  return xlsxStyleLoading
+}
+
+async function writeExportExcel(filename, rows, draft) {
+  const XLSX = await loadXlsxStyle()
+
+  // ----- Transactions sheet -----
+  const aoa = [
+    ["Date", "Month", "Budget", "Description", "Amount", "Type", "Author"]
+  ]
+  rows.forEach(r => {
+    aoa.push([r.date || "", r.month || "", r.budget || "", r.description || "", Number(r.amount) || 0, r.type || "", r.author || ""])
+  })
+  const ws = XLSX.utils.aoa_to_sheet(aoa)
+
+  ws["!cols"] = [
+    { wch: 12 },
+    { wch: 16 },
+    { wch: 22 },
+    { wch: 34 },
+    { wch: 12 },
+    { wch: 18 },
+    { wch: 26 }
+  ]
+  ws["!freeze"] = { xSplit: 0, ySplit: 1 }
+  ws["!autofilter"] = { ref: ws["!ref"] }
+
+  const headerStyle = {
+    font: { name: "Calibri", sz: 12, bold: true, color: { rgb: "FFFFFF" } },
+    fill: { patternType: "solid", fgColor: { rgb: "0F766E" } },
+    alignment: { horizontal: "left", vertical: "center" }
+  }
+  const bodyBase = {
+    font: { name: "Calibri", sz: 11, color: { rgb: "111827" } },
+    alignment: { vertical: "center" }
+  }
+  const bodyAlt = {
+    font: { name: "Calibri", sz: 11, color: { rgb: "111827" } },
+    fill: { patternType: "solid", fgColor: { rgb: "F6F8FA" } },
+    alignment: { vertical: "center" }
+  }
+
+  const range = XLSX.utils.decode_range(ws["!ref"])
+  for (let R = range.s.r; R <= range.e.r; R++) {
+    const alt = R > 0 && R % 2 === 0
+    for (let C = range.s.c; C <= range.e.c; C++) {
+      const ref = XLSX.utils.encode_cell({ c: C, r: R })
+      const cell = ws[ref]
+      if (!cell) continue
+
+      if (R === 0) {
+        cell.s = headerStyle
+        continue
+      }
+
+      const baseStyle = alt ? bodyAlt : bodyBase
+      cell.s = { ...baseStyle }
+
+      if (C === 4) {
+        cell.t = "n"
+        cell.z = '"$"#,##0.00'
+        cell.s = { ...cell.s, alignment: { vertical: "center", horizontal: "right" } }
+      }
+      if (C === 0 && typeof cell.v === "string" && /^\d{4}-\d{2}-\d{2}/.test(cell.v)) {
+        const d = new Date(cell.v + "T00:00:00")
+        if (!isNaN(d.getTime())) {
+          cell.v = d
+          cell.t = "d"
+          cell.z = "yyyy-mm-dd"
+        }
+      }
+    }
+  }
+
+  const wb = XLSX.utils.book_new()
+  XLSX.utils.book_append_sheet(wb, ws, "Transactions")
+
+  // ----- Summary sheet -----
+  const totalsByBudget = {}
+  rows.forEach(r => {
+    if (!totalsByBudget[r.budget]) totalsByBudget[r.budget] = { count: 0, total: 0 }
+    totalsByBudget[r.budget].count += 1
+    totalsByBudget[r.budget].total += Number(r.amount) || 0
+  })
+  const summaryAoa = [["Budget", "Transactions", "Total spent"]]
+  Object.entries(totalsByBudget)
+    .sort((a, b) => b[1].total - a[1].total)
+    .forEach(([label, agg]) => {
+      summaryAoa.push([label, agg.count, agg.total])
+    })
+  const grandTotal = rows.reduce((s, r) => s + (Number(r.amount) || 0), 0)
+  summaryAoa.push(["Total", rows.length, grandTotal])
+
+  const sws = XLSX.utils.aoa_to_sheet(summaryAoa)
+  sws["!cols"] = [{ wch: 28 }, { wch: 14 }, { wch: 16 }]
+  sws["!freeze"] = { xSplit: 0, ySplit: 1 }
+
+  const sRange = XLSX.utils.decode_range(sws["!ref"])
+  for (let R = sRange.s.r; R <= sRange.e.r; R++) {
+    for (let C = sRange.s.c; C <= sRange.e.c; C++) {
+      const ref = XLSX.utils.encode_cell({ c: C, r: R })
+      const cell = sws[ref]
+      if (!cell) continue
+      if (R === 0) {
+        cell.s = headerStyle
+        continue
+      }
+      const isTotalRow = R === sRange.e.r
+      cell.s = isTotalRow
+        ? { font: { name: "Calibri", sz: 11, bold: true, color: { rgb: "0F766E" } }, alignment: { vertical: "center" }, fill: { patternType: "solid", fgColor: { rgb: "E6F6F2" } } }
+        : { font: { name: "Calibri", sz: 11, color: { rgb: "111827" } }, alignment: { vertical: "center" } }
+      if (C === 2) {
+        cell.t = "n"
+        cell.z = '"$"#,##0.00'
+        cell.s = { ...cell.s, alignment: { ...cell.s.alignment, horizontal: "right" } }
+      }
+      if (C === 1) cell.t = "n"
+    }
+  }
+  XLSX.utils.book_append_sheet(wb, sws, "Summary")
+
+  const out = XLSX.write(wb, { bookType: "xlsx", type: "array" })
+  const blob = new Blob([out], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" })
+  downloadBlob(filename, blob)
 }
 
 async function installPWA(options = {}) {
