@@ -1,5 +1,5 @@
 const STORAGE_KEY = "budget_tracker_pwa_v1"
-const APP_VERSION = "34"
+const APP_VERSION = "35"
 const ROLLOVER_START_KEY = "2026-4"
 const REVIEW_REQUIRED_MONTHS = 4
 const REVIEW_HANDOFF_URL = `https://ezratawachi.github.io/scriptable-budget-tracker/pwa/?v=${APP_VERSION}&review=1`
@@ -2025,7 +2025,8 @@ const ICON_PATHS = {
   refresh: '<path d="M3 12a9 9 0 0 1 15-6.7L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-15 6.7L3 16"/><path d="M3 21v-5h5"/>',
   copy: '<rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>',
   doorOut: '<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><path d="M16 17l5-5-5-5"/><path d="M21 12H9"/>',
-  spreadsheet: '<rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18"/><path d="M3 15h18"/><path d="M9 3v18"/><path d="M15 3v18"/>'
+  spreadsheet: '<rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18"/><path d="M3 15h18"/><path d="M9 3v18"/><path d="M15 3v18"/>',
+  phonePlus: '<rect x="5" y="2" width="14" height="20" rx="3"/><path d="M12 10v6"/><path d="M9 13h6"/>'
 }
 
 const ICON_PICKER_GROUPS = [
@@ -3598,10 +3599,17 @@ function renderAccount() {
   const cloudSubtitle = signedIn
     ? (app.cloudBusy ? "Syncing now…" : `Synced ${summary.cloudSaved}`)
     : "Sign in to keep your data backed up"
+  const headerSubtitle = signedIn
+    ? (app.cloudBusy
+        ? "Syncing…"
+        : (summary.cloudSaved && summary.cloudSaved !== "not synced yet"
+            ? `Synced ${summary.cloudSaved}`
+            : "Setting up backup…"))
+    : "Local-first budget tracker"
 
   return `
     <section class="view">
-      ${header("Account", signedIn ? esc(app.cloudEmail) : "Local-first budget tracker")}
+      ${header("Account", headerSubtitle)}
       <div class="scroll account-scroll">
         <div class="account-card">
           <div class="account-avatar">${icon(signedIn ? "account" : "wallet")}</div>
@@ -3613,18 +3621,18 @@ function renderAccount() {
 
         ${signedIn ? renderSharedSection() : ""}
 
-        ${settingsSection("Library",
+        ${settingsSection("Tools",
           settingsRow({
             action: "go", view: "review",
             icon: "upload", tint: "acc",
             title: "Analyze Statements",
-            copy: "Find stable spend and leaks"
+            copy: "Find what you can stop tracking"
           }),
           settingsRow({
             action: "openMethod", step: hasCompletedMethod() ? 1 : 0,
             icon: "wallet", tint: "grn",
-            title: "Find My Pool",
-            copy: hasCompletedMethod() ? "Edit your tracking pool" : "Income minus stable expenses"
+            title: "Tracking Pool",
+            copy: hasCompletedMethod() ? "Income minus stable monthly expenses" : "Income minus stable expenses"
           }),
           settingsRow({
             action: "go", view: "cats",
@@ -3636,13 +3644,13 @@ function renderAccount() {
             action: "go", view: "presets",
             icon: "sparkles", tint: "amber",
             title: "Presets",
-            copy: "Reusable quick expenses"
+            copy: "Quick-add common expenses"
           }),
           settingsRow({
             action: "go", view: "wishes",
             icon: "heart", tint: "red",
             title: "Wishlist",
-            copy: "Planned purchases"
+            copy: "Future purchases to save for"
           })
         )}
 
@@ -3656,7 +3664,7 @@ function renderAccount() {
           </div>
         </section>
 
-        ${settingsSection("Backup",
+        ${settingsSection("Data",
           settingsRow({
             action: "openCloudSheet",
             icon: "cloud", tint: signedIn ? "grn" : "acc",
@@ -3665,23 +3673,23 @@ function renderAccount() {
           }),
           settingsRow({
             action: "openExport",
-            icon: "spreadsheet", tint: "blue",
+            icon: "download", tint: "blue",
             title: "Export data",
-            copy: "Pick range, type, budgets — CSV or Excel"
+            copy: "Pick range and budgets · CSV or Excel"
           })
         )}
 
         ${settingsSection("About",
           settingsRow({
             action: "openInstallCoach",
-            icon: installed ? "check" : "download",
+            icon: installed ? "check" : "phonePlus",
             tint: installed ? "grn" : "acc",
-            title: installed ? "Installed on this device" : "Install on this phone",
-            copy: installed ? "Running from your Home Screen" : "Save it to feel like a real app"
+            title: installed ? "Installed on this device" : "Add to Home Screen",
+            copy: installed ? "Running from your Home Screen" : "Use it like a native app"
           }),
           settingsRow({
             action: "openStory",
-            icon: "file", tint: "blue",
+            icon: "info", tint: "blue",
             title: "Read Ezra's note",
             copy: "Why this app exists"
           })
@@ -3725,19 +3733,32 @@ function renderSharedSection() {
   }
 
   const roleLabel = ws.myRole === "owner" ? "Owner" : "Member"
+  const others = Math.max(0, memberCount - 1)
+  const budgetsPart = sharedBudgetCount === 0
+    ? "no shared budgets yet"
+    : `${sharedBudgetCount} shared ${sharedBudgetCount === 1 ? "budget" : "budgets"}`
+  let workspaceCopy
+  if (others === 0 && sharedBudgetCount === 0) {
+    workspaceCopy = `${roleLabel} · invite someone to start`
+  } else if (others === 0) {
+    workspaceCopy = `${roleLabel} · just you · ${budgetsPart}`
+  } else {
+    workspaceCopy = `${roleLabel} · ${memberCount} ${memberCount === 1 ? "member" : "members"} · ${budgetsPart}`
+  }
+
   return settingsSection("Shared",
     pendingRow,
     settingsRow({
       action: "openManageWorkspace",
       icon: "users", tint: "grn",
       title: ws.name,
-      copy: `${roleLabel} · ${memberCount} ${memberCount === 1 ? "member" : "members"} · ${sharedBudgetCount} ${sharedBudgetCount === 1 ? "budget" : "budgets"}`
+      copy: workspaceCopy
     }),
     ws.myRole === "owner" ? settingsRow({
       action: "openInviteByEmailWorkspace",
       icon: "share", tint: "blue",
       title: "Invite someone",
-      copy: "By email, like Google Sheets"
+      copy: "Send an email invitation"
     }) : settingsRow({
       action: "confirmLeaveWorkspace",
       icon: "doorOut", tint: "red",
