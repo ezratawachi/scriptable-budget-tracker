@@ -1,5 +1,5 @@
 const STORAGE_KEY = "budget_tracker_pwa_v1"
-const APP_VERSION = "32"
+const APP_VERSION = "33"
 const ROLLOVER_START_KEY = "2026-4"
 const REVIEW_REQUIRED_MONTHS = 4
 const REVIEW_HANDOFF_URL = `https://ezratawachi.github.io/scriptable-budget-tracker/pwa/?v=${APP_VERSION}&review=1`
@@ -4047,9 +4047,12 @@ function doConfirmDeleteSharedBudget(budgetId) {
 function doConvertSharedToLocal(budgetId) {
   const budget = sharedBudgetById(budgetId)
   if (!budget) return
+  const signedIn = !!app.cloudUser
   confirmSheet({
     title: `Stop sharing "${budget.label}"?`,
-    body: "All transactions in this budget come back to your local data. Other members lose access. You can re-share later.",
+    body: signedIn
+      ? "All transactions come back to your private budgets. Other members lose access. Your data stays backed up to your cloud account."
+      : "All transactions come back to your private budgets. Other members lose access. Sign in to keep a cloud backup.",
     primaryLabel: "Stop sharing",
     destructive: false,
     onConfirm: async () => {
@@ -4058,7 +4061,7 @@ function doConvertSharedToLocal(budgetId) {
       closeModal(false)
       render()
       haptic("success")
-      toast(`"${budget.label}" is now local`)
+      toast(signedIn ? `"${budget.label}" is now private · backed up` : `"${budget.label}" is now private`)
     }
   })
 }
@@ -4159,7 +4162,7 @@ function renderShareBudgetModal() {
       </div>
       <div class="share-warn">
         ${icon("info")}
-        <span>Once shared, this budget needs internet to use. You can convert it back to local later.</span>
+        <span>Shared budgets live in the cloud and need internet to use. You can stop sharing and bring it back to your private budgets anytime — your data stays backed up either way.</span>
       </div>
     </div>
   `
