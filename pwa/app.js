@@ -1,5 +1,5 @@
 const STORAGE_KEY = "budget_tracker_pwa_v1"
-const APP_VERSION = "27"
+const APP_VERSION = "28"
 const ROLLOVER_START_KEY = "2026-4"
 const REVIEW_REQUIRED_MONTHS = 4
 const REVIEW_HANDOFF_URL = `https://ezratawachi.github.io/scriptable-budget-tracker/pwa/?v=${APP_VERSION}&review=1`
@@ -63,12 +63,16 @@ const app = {
     budgetMembers: {},
     transactions: {},
     pendingInvite: null,
+    pendingInvites: [],
+    declinedInviteTokens: [],
     inviteTokenFromURL: inviteTokenFromURL || null,
     lastSyncedAt: null,
     syncing: false,
     pullToRefresh: 0,
     error: null
   },
+  inviteEmailDraft: "",
+  inviteEmailScope: null,
   shareDraft: { name: "" },
   shareTargetBudgetId: null,
   shareTargetIsWorkspace: false,
@@ -440,7 +444,7 @@ async function onCloudReady() {
   if (!supabaseClient || !app.cloudUser) return
   await sharedFetchAll()
 
-  // Handle invite from URL once
+  // Legacy URL token (kept for backward compatibility with existing links)
   const token = app.shared.inviteTokenFromURL
   if (token) {
     app.shared.inviteTokenFromURL = null
@@ -452,7 +456,8 @@ async function onCloudReady() {
 
     const invite = await inviteFetch(token)
     if (invite && !invite.used_at && new Date(invite.expires_at) > new Date() && invite.inviter_id !== app.cloudUser.id) {
-      app.shared.pendingInvite = {
+      // Surface the URL invite at the top of the pending queue
+      const fromUrl = {
         token: invite.token,
         inviterEmail: invite.inviter_email,
         workspaceId: invite.workspace_id,
@@ -462,17 +467,22 @@ async function onCloudReady() {
         role: invite.role,
         expiresAt: invite.expires_at
       }
-      app.modal = "acceptInvite"
-      renderModal()
+      const dedup = (app.shared.pendingInvites || []).filter(p => p.token !== fromUrl.token)
+      app.shared.pendingInvites = [fromUrl, ...dedup]
     } else if (invite && invite.used_at) {
       toast("Invite already used")
     } else if (invite && new Date(invite.expires_at) < new Date()) {
       toast("Invite expired")
     } else if (invite && invite.inviter_id === app.cloudUser.id) {
       toast("That's your own invite link")
-    } else if (token) {
-      toast("Invite not found")
     }
+  }
+
+  // Auto-present first pending invite, if any
+  if ((app.shared.pendingInvites || []).length > 0) {
+    app.shared.pendingInvite = app.shared.pendingInvites[0]
+    app.modal = "acceptInvite"
+    renderModal()
   }
 
   render()
@@ -1041,11 +1051,16 @@ async function sharedFetchAll() {
       }
     }
 
+    // Pending invitations for me (matched by email, server-side via RLS)
+    const pending = await sharedFetchPendingInvites()
+    const visiblePending = pending.filter(p => !(app.shared.declinedInviteTokens || []).includes(p.token))
+
     app.shared.workspace = workspace
     app.shared.workspaceMembers = workspaceMembers
     app.shared.budgets = budgetList
     app.shared.budgetMembers = budgetMembers
     app.shared.transactions = transactions
+    app.shared.pendingInvites = visiblePending
     app.shared.lastSyncedAt = Date.now()
     app.shared.syncing = false
     app.shared.error = null
@@ -1356,6 +1371,7 @@ async function inviteCreate(options = {}) {
     inviter_email: app.cloudEmail || null,
     workspace_id: options.workspaceId || null,
     budget_id: options.budgetId || null,
+    invitee_email: options.inviteeEmail ? String(options.inviteeEmail).trim().toLowerCase() : null,
     role: options.role || "member"
   }
   if (!row.workspace_id && !row.budget_id) {
@@ -1372,6 +1388,89 @@ async function inviteCreate(options = {}) {
     return null
   }
   return { token: data.token, url: inviteShareURL(data.token), invite: data }
+}
+
+function isLikelyEmail(value) {
+  const s = String(value || "").trim()
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(s)
+}
+
+async function inviteByEmail(options = {}) {
+  if (!supabaseClient || !app.cloudUser) {
+    toast("Sign in first")
+    return null
+  }
+  const email = String(options.email || "").trim().toLowerCase()
+  if (!isLikelyEmail(email)) {
+    toast("That doesn't look like a valid email")
+    return null
+  }
+  if (email === (app.cloudEmail || "").toLowerCase()) {
+    toast("You can't invite yourself")
+    return null
+  }
+  const result = await inviteCreate({
+    workspaceId: options.workspaceId || null,
+    budgetId: options.budgetId || null,
+    role: options.role || "member",
+    inviteeEmail: email
+  })
+  if (!result) return null
+  return result
+}
+
+async function sharedFetchPendingInvites() {
+  if (!supabaseClient || !app.cloudUser || !app.cloudEmail) return []
+  const lower = String(app.cloudEmail).toLowerCase()
+  const { data, error } = await supabaseClient
+    .from("invites")
+    .select("token, inviter_id, inviter_email, workspace_id, budget_id, role, expires_at, used_at, invitee_email, workspaces(id, name), shared_budgets(id, label, icon)")
+    .is("used_at", null)
+    .gt("expires_at", new Date().toISOString())
+    .ilike("invitee_email", lower)
+  if (error) {
+    console.warn("sharedFetchPendingInvites error", error)
+    return []
+  }
+  return (data || []).map(inv => ({
+    token: inv.token,
+    inviterEmail: inv.inviter_email,
+    workspaceId: inv.workspace_id,
+    budgetId: inv.budget_id,
+    workspaceName: inv.workspaces && inv.workspaces.name,
+    budgetLabel: inv.shared_budgets && inv.shared_budgets.label,
+    role: inv.role,
+    expiresAt: inv.expires_at
+  }))
+}
+
+async function sharedFetchOutgoingInvites(scope) {
+  if (!supabaseClient || !app.cloudUser) return []
+  let query = supabaseClient
+    .from("invites")
+    .select("token, invitee_email, role, expires_at, used_at, used_by, workspace_id, budget_id, created_at")
+    .eq("inviter_id", app.cloudUser.id)
+    .is("used_at", null)
+    .gt("expires_at", new Date().toISOString())
+    .order("created_at", { ascending: false })
+  if (scope && scope.workspaceId) query = query.eq("workspace_id", scope.workspaceId)
+  if (scope && scope.budgetId) query = query.eq("budget_id", scope.budgetId)
+  const { data, error } = await query
+  if (error) {
+    console.warn("sharedFetchOutgoingInvites error", error)
+    return []
+  }
+  return data || []
+}
+
+async function inviteRevoke(token) {
+  if (!supabaseClient || !app.cloudUser) return false
+  const { error } = await supabaseClient.from("invites").delete().eq("token", token)
+  if (error) {
+    toast(error.message || "Could not revoke invite")
+    return false
+  }
+  return true
 }
 
 async function inviteFetch(token) {
@@ -3511,9 +3610,17 @@ function renderSharedSection() {
   const ws = app.shared.workspace
   const memberCount = app.shared.workspaceMembers.length
   const sharedBudgetCount = app.shared.budgets.length
+  const pending = (app.shared.pendingInvites || []).filter(p => !(app.shared.declinedInviteTokens || []).includes(p.token))
+  const pendingRow = pending.length ? settingsRow({
+    action: "openPendingInvites",
+    icon: "bell", tint: "amber",
+    title: `${pending.length} pending invitation${pending.length === 1 ? "" : "s"}`,
+    copy: pending.length === 1 ? "Tap to review" : "Someone wants to share with you"
+  }) : ""
 
   if (!ws) {
     return settingsSection("Shared",
+      pendingRow,
       settingsRow({
         action: "openCreateWorkspace",
         icon: "users", tint: "acc",
@@ -3521,16 +3628,17 @@ function renderSharedSection() {
         copy: "Invite a partner or family to share budgets"
       }),
       sharedBudgetCount > 0 ? settingsRow({
-        action: "openManageBudgets",
+        action: "openManageWorkspace",
         icon: "share", tint: "blue",
         title: `${sharedBudgetCount} shared ${sharedBudgetCount === 1 ? "budget" : "budgets"}`,
-        copy: "Budgets shared individually (not in a workspace)"
+        copy: "Tap a budget on Home to see members"
       }) : ""
     )
   }
 
   const roleLabel = ws.myRole === "owner" ? "Owner" : "Member"
   return settingsSection("Shared",
+    pendingRow,
     settingsRow({
       action: "openManageWorkspace",
       icon: "users", tint: "grn",
@@ -3538,10 +3646,10 @@ function renderSharedSection() {
       copy: `${roleLabel} · ${memberCount} ${memberCount === 1 ? "member" : "members"} · ${sharedBudgetCount} ${sharedBudgetCount === 1 ? "budget" : "budgets"}`
     }),
     ws.myRole === "owner" ? settingsRow({
-      action: "createWorkspaceInvite",
-      icon: "link", tint: "blue",
-      title: "Copy invite link",
-      copy: "Anyone with the link can join as Member"
+      action: "openInviteByEmailWorkspace",
+      icon: "share", tint: "blue",
+      title: "Invite someone",
+      copy: "By email, like Google Sheets"
     }) : settingsRow({
       action: "confirmLeaveWorkspace",
       icon: "doorOut", tint: "red",
@@ -3636,6 +3744,73 @@ function renderModal() {
   if (app.modal === "inviteLink") modalEl.innerHTML = renderInviteLinkModal()
   if (app.modal === "manageBudgetMembers") modalEl.innerHTML = renderManageBudgetMembersModal()
   if (app.modal === "sharedBudgetEdit") modalEl.innerHTML = renderSharedBudgetEditModal()
+  if (app.modal === "inviteByEmail") modalEl.innerHTML = renderInviteByEmailModal()
+  if (app.modal === "pendingInvites") modalEl.innerHTML = renderPendingInvitesModal()
+}
+
+function renderInviteByEmailModal() {
+  const scope = app.inviteEmailScope || {}
+  const isWorkspace = !!scope.workspaceId
+  const contextName = isWorkspace
+    ? (app.shared.workspace ? app.shared.workspace.name : "workspace")
+    : (sharedBudgetById(scope.budgetId) ? sharedBudgetById(scope.budgetId).label : "budget")
+  const draft = app.inviteEmailDraft || ""
+  const valid = isLikelyEmail(draft)
+
+  return `
+    <div class="sheet share-sheet" role="dialog" aria-modal="true" aria-label="Invite by email">
+      <div class="sheet-top">
+        <div class="sheet-title">Invite to ${esc(contextName)}</div>
+        <button class="sheet-close" aria-label="Close" data-action="closeModal">${icon("close")}</button>
+      </div>
+      <div class="share-intro">
+        <div class="share-icon">${icon("users")}</div>
+        <p>Type the email of the person you want to invite. They'll see the invitation when they open Budget Tracker.</p>
+      </div>
+      <div class="field-group">
+        <div class="field-label">Email</div>
+        <input class="field" id="invite-email-field" type="email" inputmode="email" autocomplete="email" autocapitalize="off" spellcheck="false" placeholder="them@example.com" value="${attr(draft)}">
+      </div>
+      <button class="primary-btn" id="invite-email-send" data-action="sendEmailInvite" ${valid ? "" : "disabled"}>${icon("check")} Send invite</button>
+      <div class="share-warn">
+        ${icon("info")}
+        <span>They must use the same email when they sign in to see the invitation.</span>
+      </div>
+    </div>
+  `
+}
+
+function renderPendingInvitesModal() {
+  const list = (app.shared.pendingInvites || []).filter(p => !(app.shared.declinedInviteTokens || []).includes(p.token))
+  return `
+    <div class="sheet share-sheet" role="dialog" aria-modal="true" aria-label="Pending invitations">
+      <div class="sheet-top">
+        <div class="sheet-title">Pending invitations</div>
+        <button class="sheet-close" aria-label="Close" data-action="closeModal">${icon("close")}</button>
+      </div>
+      ${list.length ? `
+        <div class="members-list">
+          ${list.map(p => {
+            const name = p.workspaceName || p.budgetLabel || "Shared budget"
+            const kind = p.workspaceId ? "Workspace" : "Budget"
+            return `
+              <div class="member-row pending-invite-row">
+                <span class="member-avatar">${esc(initialsFromEmail(p.inviterEmail || "?"))}</span>
+                <span class="member-main">
+                  <span class="member-email clamp-1">${esc(p.inviterEmail || "Unknown")}</span>
+                  <span class="member-role">${esc(kind)} · ${esc(name)}</span>
+                </span>
+                <span class="pending-invite-actions">
+                  <button class="secondary-btn pending-invite-decline" data-action="declineInviteByToken" data-id="${attr(p.token)}">Decline</button>
+                  <button class="primary-btn pending-invite-join" data-action="acceptInviteByToken" data-id="${attr(p.token)}">Join</button>
+                </span>
+              </div>
+            `
+          }).join("")}
+        </div>
+      ` : `<div class="empty compact-empty"><div class="empty-title">No pending invitations</div></div>`}
+    </div>
+  `
 }
 
 function renderSharedBudgetEditModal() {
@@ -3665,7 +3840,7 @@ function renderSharedBudgetEditModal() {
       ${budget.workspaceId
         ? ""
         : `<button class="secondary-btn cloud-full" data-action="openBudgetMembers" data-id="${attr(budget.id)}">${icon("users")} Manage members</button>`}
-      <button class="secondary-btn cloud-full" data-action="createBudgetInvite" data-id="${attr(budget.id)}">${icon("link")} Copy invite link</button>
+      <button class="secondary-btn cloud-full" data-action="openInviteByEmailBudget" data-id="${attr(budget.id)}">${icon("share")} Invite by email</button>
       <button class="danger-btn cloud-full" data-action="confirmDeleteSharedBudget" data-id="${attr(budget.id)}">${icon("trash")} Delete shared budget</button>
     </div>
   `
@@ -3766,7 +3941,7 @@ function renderManageWorkspaceModal() {
       </div>
 
       ${isOwner
-        ? `<button class="primary-btn" data-action="createWorkspaceInvite">${icon("link")} Copy invite link</button>`
+        ? `<button class="primary-btn" data-action="openInviteByEmailWorkspace">${icon("share")} Invite by email</button>`
         : `<button class="danger-btn cloud-full" data-action="confirmLeaveWorkspace">${icon("doorOut")} Leave workspace</button>`}
     </div>
   `
@@ -3904,7 +4079,7 @@ function renderManageBudgetMembersModal() {
       </div>
 
       ${isOwner
-        ? `<button class="primary-btn" data-action="createBudgetInvite" data-id="${attr(budget.id)}">${icon("link")} Copy invite link</button>`
+        ? `<button class="primary-btn" data-action="openInviteByEmailBudget" data-id="${attr(budget.id)}">${icon("share")} Invite by email</button>`
         : `<button class="danger-btn cloud-full" data-action="confirmLeaveBudget" data-id="${attr(budget.id)}">${icon("doorOut")} Leave budget</button>`}
     </div>
   `
@@ -4594,6 +4769,11 @@ function handleInput(event) {
     app.shareDraft.name = target.value
     updateButtonState("create-workspace-btn", !!app.shareDraft.name.trim())
   }
+
+  if (target.id === "invite-email-field") {
+    app.inviteEmailDraft = target.value
+    updateButtonState("invite-email-send", isLikelyEmail(target.value))
+  }
 }
 
 function handleClick(event) {
@@ -4730,6 +4910,12 @@ function handleClick(event) {
   if (action === "manualRefresh") manualRefresh()
   if (action === "saveSharedBudgetEdit") doSaveSharedBudgetEdit()
   if (action === "confirmDeleteSharedBudget") doConfirmDeleteSharedBudget(id)
+  if (action === "sendEmailInvite") doSendEmailInvite()
+  if (action === "openPendingInvites") openPendingInvitesList()
+  if (action === "acceptInviteByToken") doAcceptInviteByToken(id)
+  if (action === "declineInviteByToken") doDeclineInviteByToken(id)
+  if (action === "openInviteByEmailWorkspace") openInviteByEmailWorkspace()
+  if (action === "openInviteByEmailBudget") openInviteByEmailBudget(id)
 }
 
 function openCreateWorkspace() {
@@ -4759,33 +4945,117 @@ function openManageWorkspace() {
   renderModal()
 }
 
-async function doCreateWorkspaceInvite() {
+function doCreateWorkspaceInvite() {
+  // Email-based: open the email-input sheet
   if (!app.shared.workspace) {
     toast("Create a workspace first")
     return
   }
-  const result = await inviteCreate({ workspaceId: app.shared.workspace.id, role: "member" })
-  if (!result) return
-  app.inviteShareLink = result.url
-  app.inviteShareContextName = app.shared.workspace.name
-  app.inviteShareLinkExpiresAt = result.invite && result.invite.expires_at
-  app.modal = "inviteLink"
-  renderModal()
-  haptic("success")
+  openInviteByEmailWorkspace()
 }
 
-async function doCreateBudgetInvite(budgetId) {
-  const budget = sharedBudgetById(budgetId)
-  if (!budget) return
-  const result = await inviteCreate({ budgetId, role: "member" })
-  if (!result) return
-  app.inviteShareLink = result.url
-  app.inviteShareContextName = budget.label
-  app.inviteShareLinkExpiresAt = result.invite && result.invite.expires_at
-  app.shareTargetBudgetId = budgetId
-  app.modal = "inviteLink"
+function doCreateBudgetInvite(budgetId) {
+  // Email-based: open the email-input sheet for this budget
+  if (!sharedBudgetById(budgetId)) return
+  openInviteByEmailBudget(budgetId)
+}
+
+function openInviteByEmailWorkspace() {
+  if (!app.shared.workspace) return
+  app.inviteEmailScope = { workspaceId: app.shared.workspace.id }
+  app.inviteEmailDraft = ""
+  haptic("light")
+  app.modal = "inviteByEmail"
   renderModal()
+  setTimeout(() => {
+    const el = document.getElementById("invite-email-field")
+    if (el) el.focus()
+  }, 280)
+}
+
+function openInviteByEmailBudget(budgetId) {
+  if (!sharedBudgetById(budgetId)) return
+  app.inviteEmailScope = { budgetId }
+  app.inviteEmailDraft = ""
+  haptic("light")
+  app.modal = "inviteByEmail"
+  renderModal()
+  setTimeout(() => {
+    const el = document.getElementById("invite-email-field")
+    if (el) el.focus()
+  }, 280)
+}
+
+async function doSendEmailInvite() {
+  const scope = app.inviteEmailScope || {}
+  const email = (app.inviteEmailDraft || "").trim()
+  if (!isLikelyEmail(email)) {
+    toast("Enter a valid email")
+    return
+  }
+  const result = await inviteByEmail({
+    workspaceId: scope.workspaceId,
+    budgetId: scope.budgetId,
+    email,
+    role: "member"
+  })
+  if (!result) { haptic("error"); return }
+  closeModal(false)
   haptic("success")
+  toast(`Invitation sent to ${email}`)
+}
+
+function openPendingInvitesList() {
+  if (!(app.shared.pendingInvites || []).length) {
+    toast("No pending invitations")
+    return
+  }
+  haptic("light")
+  app.modal = "pendingInvites"
+  renderModal()
+}
+
+async function doAcceptInviteByToken(token) {
+  if (!token) return
+  const invite = (app.shared.pendingInvites || []).find(p => p.token === token)
+  if (!invite) {
+    toast("Invitation not found")
+    return
+  }
+  const result = await inviteAccept(token)
+  if (!result) { haptic("error"); return }
+  // Remove from pending list
+  app.shared.pendingInvites = (app.shared.pendingInvites || []).filter(p => p.token !== token)
+  haptic("success")
+  toast(`Joined ${invite.workspaceName || invite.budgetLabel || "shared budget"}`)
+  // If list is empty, close. If still has pending, advance to next.
+  if ((app.shared.pendingInvites || []).length > 0) {
+    app.shared.pendingInvite = app.shared.pendingInvites[0]
+    app.modal = "acceptInvite"
+    renderModal()
+  } else {
+    app.shared.pendingInvite = null
+    closeModal(false)
+  }
+  render()
+}
+
+function doDeclineInviteByToken(token) {
+  if (!token) return
+  if (!Array.isArray(app.shared.declinedInviteTokens)) app.shared.declinedInviteTokens = []
+  app.shared.declinedInviteTokens.push(token)
+  app.shared.pendingInvites = (app.shared.pendingInvites || []).filter(p => p.token !== token)
+  haptic("light")
+  toast("Invitation dismissed")
+  if ((app.shared.pendingInvites || []).length > 0) {
+    app.shared.pendingInvite = app.shared.pendingInvites[0]
+    app.modal = "acceptInvite"
+    renderModal()
+  } else {
+    app.shared.pendingInvite = null
+    closeModal(false)
+  }
+  render()
 }
 
 async function doCopyInviteLink(url) {
@@ -4974,19 +5244,13 @@ function openBudgetMembers(budgetId) {
 async function doAcceptPendingInvite() {
   const pi = app.shared.pendingInvite
   if (!pi) return
-  const result = await inviteAccept(pi.token)
-  if (!result) { haptic("error"); return }
-  app.shared.pendingInvite = null
-  closeModal(false)
-  render()
-  haptic("success")
-  toast(`Joined ${pi.workspaceName || pi.budgetLabel || "shared budget"}`)
+  await doAcceptInviteByToken(pi.token)
 }
 
 function doDeclinePendingInvite() {
-  app.shared.pendingInvite = null
-  closeModal()
-  toast("Invitation dismissed")
+  const pi = app.shared.pendingInvite
+  if (!pi) return
+  doDeclineInviteByToken(pi.token)
 }
 
 function go(view) {

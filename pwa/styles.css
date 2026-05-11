@@ -1422,6 +1422,31 @@ input:focus-visible{
   --stroke:2;
 }
 
+/* Pending invite list row */
+
+.pending-invite-row{
+  grid-template-columns:36px minmax(0,1fr);
+  gap:12px;
+  row-gap:10px;
+}
+
+.pending-invite-actions{
+  grid-column:1 / -1;
+  display:grid;
+  grid-template-columns:1fr 1fr;
+  gap:8px;
+  margin-top:4px;
+}
+
+.pending-invite-actions .primary-btn,
+.pending-invite-actions .secondary-btn{
+  width:100%;
+  min-height:40px;
+  border-radius:var(--r-pill);
+  font-size:13px;
+  font-weight:800;
+}
+
 /* Shared badge on edit sheet */
 
 .shared-badge{
