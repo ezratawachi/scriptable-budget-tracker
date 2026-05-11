@@ -1,5 +1,5 @@
 const STORAGE_KEY = "budget_tracker_pwa_v1"
-const APP_VERSION = "31"
+const APP_VERSION = "32"
 const ROLLOVER_START_KEY = "2026-4"
 const REVIEW_REQUIRED_MONTHS = 4
 const REVIEW_HANDOFF_URL = `https://ezratawachi.github.io/scriptable-budget-tracker/pwa/?v=${APP_VERSION}&review=1`
@@ -1802,12 +1802,14 @@ function calcState(data, key) {
 
   const budgets = [...localBudgets, ...sharedBudgets]
 
-  const localEntriesShaped = localEntries.map(e => ({
+  const localEntriesShaped = localEntries.map((e, idx) => ({
     id: String(e.id),
     cat: e.cat,
     amt: Number(e.amt) || 0,
     desc: e.desc || "Expense",
     date: e.date || "",
+    occurredOn: localEntryToISODate(e, key),
+    insertOrder: idx,
     shared: false
   }))
 
@@ -1827,7 +1829,8 @@ function calcState(data, key) {
         date: dateLabel,
         createdBy: tx.createdBy,
         createdByEmail: tx.createdByEmail,
-        occurredOn: tx.occurredOn,
+        occurredOn: tx.occurredOn || "",
+        insertOrder: 0,
         shared: true
       })
     }
@@ -2605,7 +2608,13 @@ function renderPresetButtons() {
 }
 
 function renderLog() {
-  const entries = [...(app.state.entries || [])].reverse()
+  const entries = [...(app.state.entries || [])].sort((a, b) => {
+    // Newest first by occurredOn (ISO YYYY-MM-DD); tiebreak by insertion order desc
+    const aDate = a.occurredOn || ""
+    const bDate = b.occurredOn || ""
+    if (aDate !== bDate) return aDate < bDate ? 1 : -1
+    return (b.insertOrder || 0) - (a.insertOrder || 0)
+  })
   let content
   if (!entries.length) {
     content = emptyState({
