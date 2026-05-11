@@ -932,9 +932,10 @@ input:focus-visible{
   --cat:var(--acc);
   --cat-soft:var(--acc2);
   flex:0 0 auto;
-  min-width:88px;
-  max-width:118px;
-  padding:10px 12px;
+  width:104px;
+  max-width:104px;
+  padding:10px 10px;
+  overflow:hidden;
   border:.5px solid var(--bord);
   border-radius:var(--r-lg);
   background:var(--card);
@@ -960,13 +961,36 @@ input:focus-visible{
 .quick-cat-emoji{
   font-size:24px;
   line-height:1;
+  flex-shrink:0;
 }
 
 .quick-cat-label{
+  width:100%;
+  max-width:100%;
+  min-width:0;
   text-align:center;
   font-size:11px;
   font-weight:800;
   color:var(--mut);
+  overflow:hidden;
+  text-overflow:ellipsis;
+  white-space:nowrap;
+}
+
+.quick-preset-row{
+  display:flex;
+  gap:8px;
+  overflow-x:auto;
+  -webkit-overflow-scrolling:touch;
+  padding:2px 2px 6px;
+  margin:0 -2px;
+  scrollbar-width:none;
+}
+
+.quick-preset-row::-webkit-scrollbar{ display:none; }
+
+.quick-preset-row .preset-btn{
+  flex-shrink:0;
 }
 
 .quick-cat.active .quick-cat-label{

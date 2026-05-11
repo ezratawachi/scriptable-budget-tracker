@@ -1,5 +1,5 @@
 const STORAGE_KEY = "budget_tracker_pwa_v1"
-const APP_VERSION = "36"
+const APP_VERSION = "37"
 const ROLLOVER_START_KEY = "2026-4"
 const REVIEW_REQUIRED_MONTHS = 4
 const REVIEW_HANDOFF_URL = `https://ezratawachi.github.io/scriptable-budget-tracker/pwa/?v=${APP_VERSION}&review=1`
@@ -4370,6 +4370,7 @@ function openCloudSheet() {
 
 function renderQuickAddModal() {
   const budgets = app.state.budgets || []
+  const presets = (app.state.presets || []).filter(p => categoryById(p.cat))
   const selected = app.selectedCat ? categoryById(app.selectedCat) : null
   const amountValue = app.drafts.add.amt
   const displayAmt = amountValue ? fmt(Number(amountValue) || 0) : "$0.00"
@@ -4384,6 +4385,23 @@ function renderQuickAddModal() {
       <div class="quick-amount-display ${amountValue ? "filled" : ""}" data-value="${attr(amountValue || "0")}">${esc(displayAmt)}</div>
 
       <input class="field quick-amount-input" id="add-amt" type="number" inputmode="decimal" placeholder="$0.00" value="${attr(amountValue)}" autocomplete="off">
+
+      ${presets.length ? `
+        <div class="section-label quick-section-label">Quick presets</div>
+        <div class="quick-preset-row">
+          ${presets.map(preset => {
+            const cat = categoryById(preset.cat) || {}
+            const color = cssColor(cat.color || "#0F766E")
+            return `
+              <button class="preset-btn quick-preset" style="--cat:${color};--cat-soft:${color}16" data-action="usePreset" data-id="${attr(preset.id)}">
+                <span class="preset-emoji">${esc(preset.icon || cat.icon || "⚡")}</span>
+                <span class="preset-copy clamp-1">${esc(preset.desc)}</span>
+                <span class="preset-amt">${fmt(preset.amt)}</span>
+              </button>
+            `
+          }).join("")}
+        </div>
+      ` : ""}
 
       <div class="section-label quick-section-label">Category</div>
       <div class="quick-cat-row">
