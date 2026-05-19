@@ -1,5 +1,5 @@
 const STORAGE_KEY = "budget_tracker_pwa_v1"
-const APP_VERSION = "37"
+const APP_VERSION = "38"
 const ROLLOVER_START_KEY = "2026-4"
 const REVIEW_REQUIRED_MONTHS = 4
 const REVIEW_HANDOFF_URL = `https://ezratawachi.github.io/scriptable-budget-tracker/pwa/?v=${APP_VERSION}&review=1`
@@ -1309,26 +1309,33 @@ async function sharedUpdateTransaction(txId, patch) {
 }
 
 async function sharedDeleteTransaction(txId) {
-  const { error } = await supabaseClient
-    .from("shared_transactions")
-    .update({ deleted_at: new Date().toISOString() })
-    .eq("id", txId)
-  if (error) {
-    toast(error.message || "Could not delete transaction")
+  const { data, error } = await supabaseClient
+    .rpc("soft_delete_shared_transaction", { tx_id: txId })
+
+  if (error || data === false) {
+    toast(sharedPermissionMessage(error, "delete"))
     return false
   }
+
   await sharedFetchAll()
   return true
 }
 
 async function sharedRestoreTransaction(txId) {
-  const { error } = await supabaseClient
-    .from("shared_transactions")
-    .update({ deleted_at: null })
-    .eq("id", txId)
-  if (error) return false
+  const { data, error } = await supabaseClient
+    .rpc("restore_shared_transaction", { tx_id: txId })
+
+  if (error || data === false) return false
   await sharedFetchAll()
   return true
+}
+
+function sharedPermissionMessage(error, action) {
+  const message = error && error.message ? String(error.message) : ""
+  if (/row-level security|not allowed|permission|policy/i.test(message)) {
+    return `Only the person who added this expense or the budget owner can ${action} it.`
+  }
+  return message || `Could not ${action} transaction`
 }
 
 async function sharedLeaveWorkspace() {
