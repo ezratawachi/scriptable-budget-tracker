@@ -1,5 +1,5 @@
 const STORAGE_KEY = "budget_tracker_pwa_v1"
-const APP_VERSION = "38"
+const APP_VERSION = "40"
 const ROLLOVER_START_KEY = "2026-4"
 const REVIEW_REQUIRED_MONTHS = 4
 const REVIEW_HANDOFF_URL = `https://ezratawachi.github.io/scriptable-budget-tracker/pwa/?v=${APP_VERSION}&review=1`
@@ -939,14 +939,6 @@ function sharedTxByBudget(budgetId) {
   return app.shared.transactions[budgetId] || []
 }
 
-function previousMonthKey(key) {
-  const parsed = parseMonthKey(key)
-  if (!parsed) return key
-  const date = new Date(parsed.year, parsed.month - 1, 1)
-  date.setMonth(date.getMonth() - 1)
-  return `${date.getFullYear()}-${date.getMonth()}`
-}
-
 // Convert a local entry (with monthKey and short "May 10"-style date string)
 // into a real YYYY-MM-DD ISO date. Falls back to first-of-month, then today.
 function localEntryToISODate(entry, monthKey) {
@@ -1040,16 +1032,15 @@ async function sharedFetchAll() {
       }
     }
 
-    // Transactions for current + previous month
+    // Fetch the full shared history. Activity/Dashboard can still render the
+    // active month, but older months must remain available for history/export.
     const transactions = {}
     if (budgetList.length) {
       const ids = budgetList.map(b => b.id)
-      const months = [app.key, previousMonthKey(app.key)]
       const { data: txs, error: e4 } = await supabaseClient
         .from("shared_transactions")
         .select("*")
         .in("budget_id", ids)
-        .in("month_key", months)
         .is("deleted_at", null)
         .order("occurred_on", { ascending: false })
       if (e4) throw e4
@@ -1739,29 +1730,10 @@ function getSpentForMonth(data, key, ids) {
 function calcRolloverMap(data, key, rawBudgets) {
   data = ensureDataShape(data)
   const budgets = Array.isArray(rawBudgets) ? rawBudgets : data._settings.budgets
-  const ids = budgets.map(b => b.id)
-  const baseById = {}
-  const carry = {}
-
-  budgets.forEach(b => {
-    baseById[b.id] = Number(b.budget) || 0
-    carry[b.id] = 0
-  })
-
-  if (compareMonthKeys(key, ROLLOVER_START_KEY) <= 0) return carry
-
-  getTrackedMonthKeys(data)
-    .filter(k => compareMonthKeys(k, ROLLOVER_START_KEY) >= 0)
-    .filter(k => compareMonthKeys(k, key) < 0)
-    .forEach(month => {
-      const spent = getSpentForMonth(data, month, ids)
-
-      ids.forEach(id => {
-        carry[id] = roundMoney((Number(baseById[id]) || 0) + (Number(carry[id]) || 0) - (Number(spent[id]) || 0))
-      })
-    })
-
-  return carry
+  return budgets.reduce((carry, budget) => {
+    carry[budget.id] = 0
+    return carry
+  }, {})
 }
 
 function calcState(data, key) {
@@ -1810,26 +1782,33 @@ function calcState(data, key) {
 
   const budgets = [...localBudgets, ...sharedBudgets]
 
-  const localEntriesShaped = localEntries.map((e, idx) => ({
+  const shapeLocalEntry = (e, idx, monthKeyValue) => ({
     id: String(e.id),
     cat: e.cat,
     amt: Number(e.amt) || 0,
     desc: e.desc || "Expense",
     date: e.date || "",
-    occurredOn: localEntryToISODate(e, key),
+    occurredOn: localEntryToISODate(e, monthKeyValue),
+    monthKey: monthKeyValue,
     insertOrder: idx,
     shared: false
-  }))
+  })
+
+  const localEntriesShaped = localEntries.map((e, idx) => shapeLocalEntry(e, idx, key))
+  const allLocalEntriesShaped = getTrackedMonthKeys(data).flatMap(month => {
+    const list = Array.isArray(data[month]) ? data[month] : []
+    return list.map((entry, idx) => shapeLocalEntry(entry, idx, month))
+  })
 
   const sharedEntriesShaped = []
+  const allSharedEntriesShaped = []
   for (const b of sharedBudgets) {
     const txs = app.shared.transactions[b.id] || []
     for (const tx of txs) {
-      if (tx.monthKey !== key) continue
       const dateLabel = tx.occurredOn
         ? new Date(tx.occurredOn + "T00:00:00").toLocaleDateString("en-US", { day: "2-digit", month: "short" })
         : ""
-      sharedEntriesShaped.push({
+      const shapedTx = {
         id: tx.id,
         cat: b.id,
         amt: tx.amount,
@@ -1838,13 +1817,17 @@ function calcState(data, key) {
         createdBy: tx.createdBy,
         createdByEmail: tx.createdByEmail,
         occurredOn: tx.occurredOn || "",
+        monthKey: tx.monthKey || "",
         insertOrder: 0,
         shared: true
-      })
+      }
+      allSharedEntriesShaped.push(shapedTx)
+      if (tx.monthKey === key) sharedEntriesShaped.push(shapedTx)
     }
   }
 
   const entries = [...localEntriesShaped, ...sharedEntriesShaped]
+  const allEntries = [...allLocalEntriesShaped, ...allSharedEntriesShaped]
 
   const spent = {}
   budgets.forEach(b => { spent[b.id] = 0 })
@@ -1858,6 +1841,7 @@ function calcState(data, key) {
     presets: data._settings.presets,
     wishes: data._settings.wishes,
     entries,
+    allEntries,
     spent,
     monthKey: key
   }
@@ -1917,9 +1901,15 @@ function rawCategoryById(id) {
 function entryById(id) {
   // Local entries use numeric ids, shared use UUIDs — match on string for both
   const target = String(id)
+  const inAll = (app.state && app.state.allEntries) ? app.state.allEntries.find(e => String(e.id) === target) : null
+  if (inAll) return inAll
   const inMerged = (app.state && app.state.entries) ? app.state.entries.find(e => String(e.id) === target) : null
   if (inMerged) return inMerged
-  return (app.data[app.key] || []).find(entry => String(entry.id) === target)
+  for (const month of getTrackedMonthKeys(app.data)) {
+    const found = (app.data[month] || []).find(entry => String(entry.id) === target)
+    if (found) return { ...found, monthKey: month, shared: false }
+  }
+  return null
 }
 
 function presetById(id) {
@@ -1930,23 +1920,10 @@ function wishById(id) {
   return app.data._settings.wishes.find(wish => wish.id === id)
 }
 
-function rolloverLabel(budget) {
-  const rollover = Number(budget.rollover) || 0
-  if (Math.abs(rollover) < 0.01) return ""
-  return "Rollover " + (rollover > 0 ? "+" : "-") + fmt(Math.abs(rollover))
-}
-
 function getBudgetHealth(totalBudget, totalSpent, spent) {
   const entries = app.state.entries || []
 
   if (!entries.length || totalSpent <= 0) {
-    const totalRoll = app.state.budgets.reduce((sum, b) => sum + (Number(b.rollover) || 0), 0)
-    if (Math.abs(totalRoll) >= 0.01) {
-      return totalRoll > 0
-        ? { text: "Rollover from previous months applied", color: "var(--grn)", bg: "#ECFDF5", border: "#A7F3D0" }
-        : { text: "Previous overage applied", color: "var(--red)", bg: "#FFF1F2", border: "#FCA5A5" }
-    }
-
     return { text: "No spending yet this month", color: "var(--mut)", bg: "var(--card)", border: "var(--bord)" }
   }
 
@@ -2451,10 +2428,6 @@ function renderHome() {
   const left = totalBudget - totalSpent
   const globalPct = totalBudget > 0 ? (totalSpent / totalBudget) * 100 : (totalSpent > 0 ? 100 : 0)
   const pct = Math.min(100, globalPct)
-  const totalRoll = app.state.budgets.reduce((sum, b) => sum + (Number(b.rollover) || 0), 0)
-  const rollText = Math.abs(totalRoll) >= 0.01
-    ? " · rollover " + (totalRoll > 0 ? "+" : "-") + fmt(Math.abs(totalRoll))
-    : ""
   const health = getBudgetHealth(totalBudget, totalSpent, spent)
   const installButton = app.installPrompt
     ? `<button class="top-btn icon-btn" title="Install" aria-label="Install" data-action="install">${icon("download")}</button>`
@@ -2486,7 +2459,7 @@ function renderHome() {
       <div class="hero ${app.methodJustSaved ? "just-saved" : ""}">
         <div class="hero-label">${left < 0 ? "Over budget" : "Available"}</div>
         <div class="hero-amount" data-value="${Math.abs(left)}" style="color:${left < 0 ? "var(--red)" : "var(--txt)"}">${money0(Math.abs(left))}</div>
-        <div class="hero-sub">${fmt(totalSpent)} spent of ${fmt(totalBudget)}${rollText}</div>
+        <div class="hero-sub">${fmt(totalSpent)} spent of ${fmt(totalBudget)}</div>
         <div class="hero-meta">
           <span class="status-pill" style="color:${health.color};background:${health.bg};border-color:${health.border}">${esc(health.text)}</span>
           <span class="hero-used">${Math.round(globalPct)}% used</span>
@@ -2517,7 +2490,6 @@ function renderBudgetCard(budget) {
   const over = spent > limit
   const color = over ? "var(--red)" : cssColor(budget.color)
   const remaining = limit - spent
-  const roll = rolloverLabel(budget)
   const memberCount = budget.shared && Array.isArray(budget.members) ? budget.members.length : 0
   const sharedChip = budget.shared
     ? `<span class="shared-chip" title="Shared with ${memberCount} ${memberCount === 1 ? "person" : "people"}">${icon("users")}${memberCount > 1 ? `<span>${memberCount}</span>` : ""}</span>`
@@ -2531,7 +2503,6 @@ function renderBudgetCard(budget) {
           <div>
             <div class="budget-name">${esc(budget.label)}${sharedChip}</div>
             <div class="budget-meta">${remaining >= 0 ? fmt(remaining) + " left" : fmt(Math.abs(remaining)) + " over"}</div>
-            ${roll ? `<div class="budget-meta">${esc(roll)}</div>` : ""}
           </div>
         </div>
         <div class="budget-right">
@@ -2618,7 +2589,7 @@ function renderPresetButtons() {
 }
 
 function renderLog() {
-  const entries = [...(app.state.entries || [])].sort((a, b) => {
+  const entries = [...(app.state.allEntries || app.state.entries || [])].sort((a, b) => {
     // Newest first by occurredOn (ISO YYYY-MM-DD); tiebreak by insertion order desc
     const aDate = a.occurredOn || ""
     const bDate = b.occurredOn || ""
@@ -2629,7 +2600,7 @@ function renderLog() {
   if (!entries.length) {
     content = emptyState({
       icon: "activity",
-      title: "Nothing logged this month",
+      title: "Nothing logged yet",
       body: "Tap + when something leaks.",
       action: { action: "openQuickAdd", label: "Log a leak", style: "primary-btn" }
     })
@@ -2734,9 +2705,7 @@ function renderCategories() {
 }
 
 function renderCategoryManagerCard(budget) {
-  const base = Number(budget.baseBudget) || 0
-  const roll = rolloverLabel(budget)
-  const effective = Number(budget.budget) || 0
+  const monthly = Number(budget.baseBudget) || Number(budget.budget) || 0
 
   return `
     <button class="card cat-card budget-manage-card" data-action="openBudgetEdit" data-id="${attr(budget.id)}" style="--cat:${cssColor(budget.color)};--cat-soft:${cssColor(budget.color)}16">
@@ -2748,9 +2717,9 @@ function renderCategoryManagerCard(budget) {
             <span class="cat-text clamp-1">${esc(budget.label)}</span>
           </span>
         </div>
-        <div class="cat-budget">Base ${fmt(base)}</div>
+        <div class="cat-budget">${fmt(monthly)}</div>
       </div>
-      <div class="cat-meta">${roll ? esc(roll) : "No rollover"} · effective ${fmt(effective)}</div>
+      <div class="cat-meta">Monthly limit</div>
     </button>
   `
 }
@@ -6758,9 +6727,9 @@ async function saveEditingEntry() {
   }
 
   // The `entry` from entryById is the state-shaped copy (calcState rebuilds
-  // app.state.entries every render). Mutating it doesn't persist. Find the
-  // RAW entry on app.data[app.key] and mutate that one.
-  const rawList = Array.isArray(app.data[app.key]) ? app.data[app.key] : []
+  // app.state entries every render). Mutate the raw row in the row's original month.
+  const monthKey = entry.monthKey || app.key
+  const rawList = Array.isArray(app.data[monthKey]) ? app.data[monthKey] : []
   const targetId = String(entry.id)
   const rawEntry = rawList.find(e => String(e.id) === targetId)
   if (!rawEntry) {
@@ -6810,10 +6779,13 @@ async function deleteEntry(id, options = {}) {
     return
   }
 
-  if (!Array.isArray(app.data[app.key])) return
-  const monthKey = app.key
-  const snapshot = clone(entry)
-  app.data[monthKey] = app.data[monthKey].filter(e => Number(e.id) !== Number(id))
+  const monthKey = entry.monthKey || app.key
+  if (!Array.isArray(app.data[monthKey])) return
+  const targetId = String(entry.id)
+  const rawEntry = app.data[monthKey].find(e => String(e.id) === targetId)
+  if (!rawEntry) return
+  const snapshot = clone(rawEntry)
+  app.data[monthKey] = app.data[monthKey].filter(e => String(e.id) !== targetId)
   saveData(app.data)
   render()
   haptic("warning")
