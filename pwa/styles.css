@@ -912,6 +912,10 @@ input:focus-visible{
   letter-spacing:.01em;
 }
 
+.quick-date-group{
+  margin:10px 0 12px;
+}
+
 .quick-section-label{
   margin-top:4px;
 }
@@ -1904,6 +1908,24 @@ input:focus-visible{
   padding:14px 16px;
   font-size:16px;
   letter-spacing:-.005em;
+}
+
+.date-field{
+  appearance:none;
+  -webkit-appearance:none;
+  color-scheme:light;
+}
+
+.date-field::-webkit-calendar-picker-indicator{
+  opacity:.72;
+  cursor:pointer;
+}
+
+.field-hint{
+  margin-top:6px;
+  color:var(--mut);
+  font-size:12px;
+  font-weight:750;
 }
 
 .code-field{
@@ -4360,6 +4382,10 @@ button:disabled{
 [data-theme="dark"] .mini-field,
 [data-theme="dark"] .code-field{
   background:var(--card);
+}
+
+[data-theme="dark"] .date-field{
+  color-scheme:dark;
 }
 
 [data-theme="dark"] .nav-btn.active{

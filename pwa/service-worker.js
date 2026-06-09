@@ -1,9 +1,9 @@
-const CACHE_NAME = "budget-pwa-v40"
+const CACHE_NAME = "budget-pwa-v41"
 const ASSETS = [
   "./",
   "./index.html",
-  "./styles.css?v=40",
-  "./app.js?v=40",
+  "./styles.css?v=41",
+  "./app.js?v=41",
   "./vendor/supabase.min.js",
   "./manifest.webmanifest",
   "./icons/icon-180.png",

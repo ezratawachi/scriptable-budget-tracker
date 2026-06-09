@@ -1,5 +1,5 @@
 const STORAGE_KEY = "budget_tracker_pwa_v1"
-const APP_VERSION = "40"
+const APP_VERSION = "41"
 const ROLLOVER_START_KEY = "2026-4"
 const REVIEW_REQUIRED_MONTHS = 4
 const REVIEW_HANDOFF_URL = `https://ezratawachi.github.io/scriptable-budget-tracker/pwa/?v=${APP_VERSION}&review=1`
@@ -89,13 +89,13 @@ const app = {
   lastCloudSyncAt: null,
   recoveringPassword: false,
   drafts: {
-    add: { amt: "", desc: "" },
+    add: freshAddDraft(),
     category: { icon: "", label: "", budget: "" },
     preset: { icon: "", desc: "", amt: "" },
     presetEdit: { icon: "", desc: "", amt: "" },
     wish: { icon: "", desc: "", amt: "" },
     budgetEdit: { icon: "", label: "", budget: "" },
-    edit: { desc: "", amt: "" },
+    edit: { desc: "", amt: "", dateISO: todayISO() },
     wishEdit: { icon: "", desc: "", amt: "" },
     method: { monthlyIncome: "", predictableExpensesTotal: "", intentionalPool: "" },
     cloud: { email: "", password: "", code: "", codeSent: false, mode: "signin", resetSent: false, newPassword: "", confirmPassword: "" }
@@ -131,6 +131,94 @@ function fmt(value) {
 
 function money0(value) {
   return "$" + Math.round(Number(value) || 0)
+}
+
+function pad2(value) {
+  return String(value).padStart(2, "0")
+}
+
+function isoFromDate(date = new Date()) {
+  return `${date.getFullYear()}-${pad2(date.getMonth() + 1)}-${pad2(date.getDate())}`
+}
+
+function todayISO() {
+  return isoFromDate(new Date())
+}
+
+function datePartsFromISO(value) {
+  const match = String(value || "").match(/^(\d{4})-(\d{2})-(\d{2})$/)
+  if (!match) return null
+  const year = Number(match[1])
+  const month = Number(match[2])
+  const day = Number(match[3])
+  const date = new Date(year, month - 1, day)
+  if (
+    date.getFullYear() !== year ||
+    date.getMonth() !== month - 1 ||
+    date.getDate() !== day
+  ) return null
+  return { year, month: month - 1, day, date }
+}
+
+function isISODate(value) {
+  return !!datePartsFromISO(value)
+}
+
+function dateLabelFromISO(value) {
+  const parts = datePartsFromISO(value)
+  const date = parts ? parts.date : new Date()
+  return date.toLocaleDateString("en-US", {
+    day: "2-digit",
+    month: "short"
+  })
+}
+
+function monthKeyFromISO(value) {
+  const parts = datePartsFromISO(value)
+  return parts ? `${parts.year}-${parts.month}` : monthKey()
+}
+
+function monthShortLabel(key) {
+  return monthLabel(key).replace(/\s+\d{4}$/, "")
+}
+
+function dateFriendlyLabel(value) {
+  const iso = isISODate(value) ? String(value) : todayISO()
+  if (iso === todayISO()) return "Today"
+
+  const yesterday = new Date()
+  yesterday.setDate(yesterday.getDate() - 1)
+  if (iso === isoFromDate(yesterday)) return "Yesterday"
+
+  const parts = datePartsFromISO(iso)
+  return parts
+    ? parts.date.toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" })
+    : "Today"
+}
+
+function clampExpenseDateISO(value) {
+  const iso = isISODate(value) ? String(value) : todayISO()
+  const today = todayISO()
+  return iso > today ? today : iso
+}
+
+function normalizeLocalEntryDateISO(entry, key) {
+  if (entry && isISODate(entry.dateISO)) return String(entry.dateISO)
+
+  const parsed = parseMonthKey(key)
+  if (!parsed) return todayISO()
+
+  const dayMatch = String((entry && entry.date) || "").match(/\d+/)
+  let day = dayMatch ? parseInt(dayMatch[0], 10) : 1
+  if (!Number.isFinite(day) || day < 1 || day > 31) day = 1
+
+  const safeDate = new Date(parsed.year, parsed.month, day)
+  if (safeDate.getMonth() !== parsed.month) day = 1
+  return `${parsed.year}-${pad2(parsed.month + 1)}-${pad2(day)}`
+}
+
+function freshAddDraft() {
+  return { amt: "", desc: "", dateISO: todayISO() }
 }
 
 function cssColor(value) {
@@ -239,19 +327,23 @@ function ensureDataShape(data) {
   d._settings.review = ensureReviewShape(d._settings.review)
 
   if (!d._settings._meta || typeof d._settings._meta !== "object") d._settings._meta = {}
-  d._settings._meta.schemaVersion = 9
+  d._settings._meta.schemaVersion = 10
   d._settings._meta.lastSaved = Number(d._settings._meta.lastSaved) || 0
 
   Object.keys(d).forEach(key => {
     if (key === "_settings" || !parseMonthKey(key)) return
     d[key] = Array.isArray(d[key])
-      ? d[key].filter(Boolean).map(entry => ({
-        id: Number(entry.id) || Date.now() + Math.floor(Math.random() * 1000),
-        desc: String(entry.desc || "Expense"),
-        amt: Number(entry.amt) || 0,
-        cat: String(entry.cat || ""),
-        date: String(entry.date || "")
-      })).filter(entry => entry.amt > 0)
+      ? d[key].filter(Boolean).map(entry => {
+        const dateISO = normalizeLocalEntryDateISO(entry, key)
+        return {
+          id: Number(entry.id) || Date.now() + Math.floor(Math.random() * 1000),
+          desc: String(entry.desc || "Expense"),
+          amt: Number(entry.amt) || 0,
+          cat: String(entry.cat || ""),
+          date: dateLabelFromISO(dateISO),
+          dateISO
+        }
+      }).filter(entry => entry.amt > 0)
       : []
   })
 
@@ -942,15 +1034,7 @@ function sharedTxByBudget(budgetId) {
 // Convert a local entry (with monthKey and short "May 10"-style date string)
 // into a real YYYY-MM-DD ISO date. Falls back to first-of-month, then today.
 function localEntryToISODate(entry, monthKey) {
-  const parsed = parseMonthKey(monthKey)
-  if (!parsed) return new Date().toISOString().slice(0, 10)
-  const dayMatch = String((entry && entry.date) || "").match(/\d+/)
-  let day = dayMatch ? parseInt(dayMatch[0], 10) : 1
-  if (!Number.isFinite(day) || day < 1 || day > 31) day = 1
-  const yyyy = parsed.year
-  const mm = String(parsed.month + 1).padStart(2, "0")
-  const dd = String(day).padStart(2, "0")
-  return `${yyyy}-${mm}-${dd}`
+  return normalizeLocalEntryDateISO(entry, monthKey)
 }
 
 function randomInviteToken() {
@@ -1225,15 +1309,14 @@ async function sharedConvertSharedToLocal(budgetId) {
   for (const tx of (txs || [])) {
     const mk = tx.month_key
     if (!Array.isArray(app.data[mk])) app.data[mk] = []
-    const date = tx.occurred_on
-      ? new Date(tx.occurred_on + "T00:00:00").toLocaleDateString("en-US", { day: "2-digit", month: "short" })
-      : todayLabel()
+    const dateISO = isISODate(tx.occurred_on) ? tx.occurred_on : todayISO()
     app.data[mk].push({
       id: Date.now() + Math.floor(Math.random() * 1000000),
       cat: localId,
       amt: Math.abs(Number(tx.amount) || 0),
       desc: tx.description || "Expense",
-      date
+      date: dateLabelFromISO(dateISO),
+      dateISO
     })
   }
   saveData(app.data)
@@ -1253,9 +1336,8 @@ async function sharedAddTransaction(budgetId, payload) {
     toast("Amount must be greater than zero")
     return null
   }
-  const occurredOn = String(payload.occurredOn || new Date().toISOString().slice(0, 10))
-  const date = new Date(occurredOn)
-  const mk = `${date.getFullYear()}-${date.getMonth()}`
+  const occurredOn = clampExpenseDateISO(payload.occurredOn)
+  const mk = monthKeyFromISO(occurredOn)
   const row = {
     budget_id: budgetId,
     created_by: app.cloudUser.id,
@@ -1283,9 +1365,9 @@ async function sharedUpdateTransaction(txId, patch) {
   if ("amount" in patch) update.amount = Math.abs(Number(patch.amount) || 0)
   if ("description" in patch) update.description = String(patch.description || "").trim() || "Expense"
   if ("occurredOn" in patch) {
-    update.occurred_on = patch.occurredOn
-    const date = new Date(patch.occurredOn)
-    update.month_key = `${date.getFullYear()}-${date.getMonth()}`
+    const occurredOn = clampExpenseDateISO(patch.occurredOn)
+    update.occurred_on = occurredOn
+    update.month_key = monthKeyFromISO(occurredOn)
   }
   const { error } = await supabaseClient
     .from("shared_transactions")
@@ -1419,7 +1501,7 @@ async function sharedConvertLocalBudget(localBudgetId, options = {}) {
         amount: Number(entry.amt) || 0,
         description: entry.desc || "Expense",
         occurred_on: occurredISO,
-        month_key: key
+        month_key: monthKeyFromISO(occurredISO)
       })
     })
   })
@@ -1782,17 +1864,21 @@ function calcState(data, key) {
 
   const budgets = [...localBudgets, ...sharedBudgets]
 
-  const shapeLocalEntry = (e, idx, monthKeyValue) => ({
-    id: String(e.id),
-    cat: e.cat,
-    amt: Number(e.amt) || 0,
-    desc: e.desc || "Expense",
-    date: e.date || "",
-    occurredOn: localEntryToISODate(e, monthKeyValue),
-    monthKey: monthKeyValue,
-    insertOrder: idx,
-    shared: false
-  })
+  const shapeLocalEntry = (e, idx, monthKeyValue) => {
+    const occurredOn = localEntryToISODate(e, monthKeyValue)
+    return {
+      id: String(e.id),
+      cat: e.cat,
+      amt: Number(e.amt) || 0,
+      desc: e.desc || "Expense",
+      date: dateLabelFromISO(occurredOn),
+      dateISO: occurredOn,
+      occurredOn,
+      monthKey: monthKeyValue,
+      insertOrder: idx,
+      shared: false
+    }
+  }
 
   const localEntriesShaped = localEntries.map((e, idx) => shapeLocalEntry(e, idx, key))
   const allLocalEntriesShaped = getTrackedMonthKeys(data).flatMap(month => {
@@ -1806,7 +1892,7 @@ function calcState(data, key) {
     const txs = app.shared.transactions[b.id] || []
     for (const tx of txs) {
       const dateLabel = tx.occurredOn
-        ? new Date(tx.occurredOn + "T00:00:00").toLocaleDateString("en-US", { day: "2-digit", month: "short" })
+        ? dateLabelFromISO(tx.occurredOn)
         : ""
       const shapedTx = {
         id: tx.id,
@@ -1814,6 +1900,7 @@ function calcState(data, key) {
         amt: tx.amount,
         desc: tx.description,
         date: dateLabel,
+        dateISO: tx.occurredOn || "",
         createdBy: tx.createdBy,
         createdByEmail: tx.createdByEmail,
         occurredOn: tx.occurredOn || "",
@@ -1884,10 +1971,7 @@ function makeWishId(desc) {
 }
 
 function todayLabel() {
-  return new Date().toLocaleDateString("en-US", {
-    day: "2-digit",
-    month: "short"
-  })
+  return dateLabelFromISO(todayISO())
 }
 
 function categoryById(id) {
@@ -1907,7 +1991,17 @@ function entryById(id) {
   if (inMerged) return inMerged
   for (const month of getTrackedMonthKeys(app.data)) {
     const found = (app.data[month] || []).find(entry => String(entry.id) === target)
-    if (found) return { ...found, monthKey: month, shared: false }
+    if (found) {
+      const dateISO = localEntryToISODate(found, month)
+      return {
+        ...found,
+        date: dateLabelFromISO(dateISO),
+        dateISO,
+        occurredOn: dateISO,
+        monthKey: month,
+        shared: false
+      }
+    }
   }
   return null
 }
@@ -2523,6 +2617,7 @@ function renderBudgetCard(budget) {
 function renderAdd() {
   const selected = app.selectedCat ? categoryById(app.selectedCat) : null
   const selectedColor = selected ? cssColor(selected.color) : "var(--bord)"
+  const addDate = clampExpenseDateISO(app.drafts.add.dateISO)
 
   return `
     <section class="view">
@@ -2555,6 +2650,12 @@ function renderAdd() {
       <div class="field-group">
         <div class="field-label">Amount</div>
         <input class="field" id="add-amt" type="number" inputmode="decimal" placeholder="$0.00" value="${attr(app.drafts.add.amt)}">
+      </div>
+
+      <div class="field-group">
+        <div class="field-label">Date</div>
+        <input class="field date-field" id="add-date" type="date" max="${attr(todayISO())}" value="${attr(addDate)}">
+        <div class="field-hint" id="add-date-hint">${esc(dateFriendlyLabel(addDate))}</div>
       </div>
 
       <div class="field-group">
@@ -4350,6 +4451,7 @@ function renderQuickAddModal() {
   const selected = app.selectedCat ? categoryById(app.selectedCat) : null
   const amountValue = app.drafts.add.amt
   const displayAmt = amountValue ? fmt(Number(amountValue) || 0) : "$0.00"
+  const addDate = clampExpenseDateISO(app.drafts.add.dateISO)
 
   return `
     <div class="sheet quick-sheet" role="dialog" aria-modal="true" aria-label="Log a leak">
@@ -4361,6 +4463,12 @@ function renderQuickAddModal() {
       <div class="quick-amount-display ${amountValue ? "filled" : ""}" data-value="${attr(amountValue || "0")}">${esc(displayAmt)}</div>
 
       <input class="field quick-amount-input" id="add-amt" type="number" inputmode="decimal" placeholder="$0.00" value="${attr(amountValue)}" autocomplete="off">
+
+      <div class="field-group quick-date-group">
+        <div class="field-label">Date</div>
+        <input class="field date-field" id="add-date" type="date" max="${attr(todayISO())}" value="${attr(addDate)}">
+        <div class="field-hint" id="add-date-hint">${esc(dateFriendlyLabel(addDate))}</div>
+      </div>
 
       ${presets.length ? `
         <div class="section-label quick-section-label">Quick presets</div>
@@ -4431,42 +4539,48 @@ async function saveQuickExpense() {
   if (!cat || amount <= 0) return
 
   const description = app.drafts.add.desc.trim() || cat.label
+  const selectedDate = clampExpenseDateISO(app.drafts.add.dateISO)
+  const targetKey = monthKeyFromISO(selectedDate)
 
   if (cat.shared) {
     const result = await sharedAddTransaction(cat.id, {
       amount,
       description,
-      occurredOn: new Date().toISOString().slice(0, 10)
+      occurredOn: selectedDate
     })
     if (!result) {
       haptic("error")
       return
     }
-    app.drafts.add = { amt: "", desc: "" }
+    app.drafts.add = freshAddDraft()
     app.selectedCat = null
+    if (targetKey !== app.key) app.view = "log"
     closeModal(false)
     render()
     haptic("success")
-    toast("Logged")
+    toast(targetKey === app.key ? "Logged" : `Logged for ${monthShortLabel(targetKey)}`)
     return
   }
 
-  if (!Array.isArray(app.data[app.key])) app.data[app.key] = []
-  app.data[app.key].push({
+  if (!Array.isArray(app.data[targetKey])) app.data[targetKey] = []
+  app.data[targetKey].push({
     id: Date.now() + Math.floor(Math.random() * 1000),
     cat: cat.id,
     amt: amount,
     desc: description,
-    date: todayLabel()
+    date: dateLabelFromISO(selectedDate),
+    dateISO: selectedDate
   })
+  markActiveMonth(app.data, targetKey)
 
-  app.drafts.add = { amt: "", desc: "" }
+  app.drafts.add = freshAddDraft()
   app.selectedCat = null
+  if (targetKey !== app.key) app.view = "log"
   closeModal(false)
   saveData(app.data)
   render()
   haptic("success")
-  toast("Logged")
+  toast(targetKey === app.key ? "Logged" : `Logged for ${monthShortLabel(targetKey)}`)
 }
 
 function renderCatPickerModal() {
@@ -4504,6 +4618,7 @@ function renderEntryEditModal() {
     closeModal()
     return ""
   }
+  const editDate = clampExpenseDateISO(app.drafts.edit.dateISO || entry.dateISO || entry.occurredOn)
 
   return `
     <div class="sheet" role="dialog" aria-modal="true" aria-label="Edit expense">
@@ -4518,6 +4633,11 @@ function renderEntryEditModal() {
       <div class="field-group">
         <div class="field-label">Amount</div>
         <input class="field" id="edit-amt" type="number" inputmode="decimal" placeholder="$0.00" value="${attr(app.drafts.edit.amt)}">
+      </div>
+      <div class="field-group">
+        <div class="field-label">Date</div>
+        <input class="field date-field" id="edit-date" type="date" max="${attr(todayISO())}" value="${attr(editDate)}">
+        <div class="field-hint" id="edit-date-hint">${esc(dateFriendlyLabel(editDate))}</div>
       </div>
       <div class="field-label">Category</div>
       <div class="pill-wrap">
@@ -4957,6 +5077,12 @@ function handleInput(event) {
   }
 
   if (target.id === "add-desc") app.drafts.add.desc = target.value
+  if (target.id === "add-date") {
+    app.drafts.add.dateISO = clampExpenseDateISO(target.value)
+    target.value = app.drafts.add.dateISO
+    const hint = document.getElementById("add-date-hint")
+    if (hint) hint.textContent = dateFriendlyLabel(app.drafts.add.dateISO)
+  }
 
   if (target.id === "cat-label") app.drafts.category.label = target.value
   if (target.id === "cat-budget") app.drafts.category.budget = target.value
@@ -4984,6 +5110,12 @@ function handleInput(event) {
 
   if (target.id === "edit-desc") app.drafts.edit.desc = target.value
   if (target.id === "edit-amt") app.drafts.edit.amt = target.value
+  if (target.id === "edit-date") {
+    app.drafts.edit.dateISO = clampExpenseDateISO(target.value)
+    target.value = app.drafts.edit.dateISO
+    const hint = document.getElementById("edit-date-hint")
+    if (hint) hint.textContent = dateFriendlyLabel(app.drafts.edit.dateISO)
+  }
 
   if (target.id === "wish-edit-desc") app.drafts.wishEdit.desc = target.value
   if (target.id === "wish-edit-amt") app.drafts.wishEdit.amt = target.value
@@ -6217,39 +6349,43 @@ async function saveExpense() {
   if (!cat || amount <= 0) return
 
   const description = app.drafts.add.desc.trim() || cat.label
+  const selectedDate = clampExpenseDateISO(app.drafts.add.dateISO)
+  const targetKey = monthKeyFromISO(selectedDate)
 
   if (cat.shared) {
     const result = await sharedAddTransaction(cat.id, {
       amount,
       description,
-      occurredOn: new Date().toISOString().slice(0, 10)
+      occurredOn: selectedDate
     })
     if (!result) { haptic("error"); return }
-    app.drafts.add = { amt: "", desc: "" }
+    app.drafts.add = freshAddDraft()
     app.selectedCat = null
-    app.view = "home"
+    app.view = targetKey === app.key ? "home" : "log"
     render()
     haptic("success")
-    toast("Saved")
+    toast(targetKey === app.key ? "Saved" : `Saved for ${monthShortLabel(targetKey)}`)
     return
   }
 
-  if (!Array.isArray(app.data[app.key])) app.data[app.key] = []
-  app.data[app.key].push({
+  if (!Array.isArray(app.data[targetKey])) app.data[targetKey] = []
+  app.data[targetKey].push({
     id: Date.now() + Math.floor(Math.random() * 1000),
     cat: cat.id,
     amt: amount,
     desc: description,
-    date: todayLabel()
+    date: dateLabelFromISO(selectedDate),
+    dateISO: selectedDate
   })
+  markActiveMonth(app.data, targetKey)
 
-  app.drafts.add = { amt: "", desc: "" }
+  app.drafts.add = freshAddDraft()
   app.selectedCat = null
   saveData(app.data)
-  app.view = "home"
+  app.view = targetKey === app.key ? "home" : "log"
   render()
   haptic("success")
-  toast("Saved")
+  toast(targetKey === app.key ? "Saved" : `Saved for ${monthShortLabel(targetKey)}`)
 }
 
 function usePreset(id) {
@@ -6596,13 +6732,15 @@ function buyWish(id) {
     return
   }
 
+  const selectedDate = todayISO()
   if (!Array.isArray(app.data[app.key])) app.data[app.key] = []
   app.data[app.key].push({
     id: Date.now() + Math.floor(Math.random() * 1000),
     desc: wish.desc,
     amt: Number(wish.amt) || 0,
     cat: wish.cat,
-    date: todayLabel()
+    date: dateLabelFromISO(selectedDate),
+    dateISO: selectedDate
   })
   app.data._settings.wishes = app.data._settings.wishes.filter(w => w.id !== id)
   saveData(app.data)
@@ -6686,7 +6824,8 @@ function openEntryEdit(id) {
   app.editingCat = entry.cat
   app.drafts.edit = {
     desc: entry.desc || "",
-    amt: String(Number(entry.amt) || "")
+    amt: String(Number(entry.amt) || ""),
+    dateISO: clampExpenseDateISO(entry.dateISO || entry.occurredOn)
   }
   openModal("entryEdit")
 }
@@ -6705,6 +6844,9 @@ async function saveEditingEntry() {
     return
   }
   const description = app.drafts.edit.desc.trim() || "Expense"
+  const selectedDate = clampExpenseDateISO(app.drafts.edit.dateISO || entry.dateISO || entry.occurredOn)
+  const targetMonthKey = monthKeyFromISO(selectedDate)
+  const currentMonthKey = entry.monthKey || app.key
 
   if (entry.shared) {
     // Shared transactions: recategorizing across budgets isn't supported in v1 because
@@ -6716,19 +6858,19 @@ async function saveEditingEntry() {
     const ok = await sharedUpdateTransaction(entry.id, {
       amount,
       description,
-      occurredOn: entry.occurredOn || new Date().toISOString().slice(0, 10)
+      occurredOn: selectedDate
     })
     if (!ok) { haptic("error"); return }
     closeModal(false)
     render()
     haptic("success")
-    toast("Expense updated")
+    toast(targetMonthKey === currentMonthKey ? "Expense updated" : `Moved to ${monthShortLabel(targetMonthKey)}`)
     return
   }
 
   // The `entry` from entryById is the state-shaped copy (calcState rebuilds
   // app.state entries every render). Mutate the raw row in the row's original month.
-  const monthKey = entry.monthKey || app.key
+  const monthKey = currentMonthKey
   const rawList = Array.isArray(app.data[monthKey]) ? app.data[monthKey] : []
   const targetId = String(entry.id)
   const rawEntry = rawList.find(e => String(e.id) === targetId)
@@ -6736,14 +6878,29 @@ async function saveEditingEntry() {
     toast("Could not find this expense")
     return
   }
-  rawEntry.desc = description
-  rawEntry.amt = amount
-  rawEntry.cat = app.editingCat
+  const updatedEntry = {
+    ...rawEntry,
+    desc: description,
+    amt: amount,
+    cat: app.editingCat,
+    date: dateLabelFromISO(selectedDate),
+    dateISO: selectedDate
+  }
+
+  if (targetMonthKey === monthKey) {
+    Object.assign(rawEntry, updatedEntry)
+  } else {
+    app.data[monthKey] = rawList.filter(e => String(e.id) !== targetId)
+    if (!Array.isArray(app.data[targetMonthKey])) app.data[targetMonthKey] = []
+    app.data[targetMonthKey].push(updatedEntry)
+    markActiveMonth(app.data, targetMonthKey)
+  }
+
   closeModal(false)
   saveData(app.data)
   render()
   haptic("success")
-  toast("Expense updated")
+  toast(targetMonthKey === monthKey ? "Expense updated" : `Moved to ${monthShortLabel(targetMonthKey)}`)
 }
 
 async function deleteEntry(id, options = {}) {
@@ -6857,7 +7014,7 @@ function downloadBlob(filename, blob) {
 }
 
 function todayISODate() {
-  return new Date().toISOString().slice(0, 10)
+  return todayISO()
 }
 
 // ============================================================
