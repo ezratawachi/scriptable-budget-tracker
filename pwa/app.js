@@ -1,5 +1,5 @@
 const STORAGE_KEY = "budget_tracker_pwa_v1"
-const APP_VERSION = "41"
+const APP_VERSION = "42"
 const ROLLOVER_START_KEY = "2026-4"
 const REVIEW_REQUIRED_MONTHS = 4
 const REVIEW_HANDOFF_URL = `https://ezratawachi.github.io/scriptable-budget-tracker/pwa/?v=${APP_VERSION}&review=1`
@@ -37,8 +37,17 @@ const app = {
   editingPresetCat: null,
   editingEntryId: null,
   editingCat: null,
+  editingEntryShared: false,
   editingWishId: null,
   editingWishCat: null,
+  categoryHistory: {
+    catId: null,
+    tab: "month",
+    query: "",
+    mode: "list",
+    returnModal: null,
+    editBack: "list"
+  },
   iconPickerTarget: null,
   iconPickerReturnModal: null,
   iconPickerQuery: "",
@@ -2665,6 +2674,8 @@ function renderAdd() {
 
       <button class="primary-btn" id="save-expense" data-action="saveExpense" ${canSaveExpense() ? "" : "disabled"}>${icon("check")} Save Expense</button>
 
+      ${selected ? renderCategoryHistoryCompact(selected) : ""}
+
       <div class="scroll"></div>
       ${nav()}
     </section>
@@ -2761,6 +2772,267 @@ function renderLogItem(entry) {
       <span class="row-side">
         <span class="row-amount">${fmt(entry.amt)}</span>
         <span class="row-date">${esc(entry.date || "")}</span>
+      </span>
+    </button>
+  `
+}
+
+function entryISO(entry) {
+  return isISODate(entry?.dateISO) ? entry.dateISO : isISODate(entry?.occurredOn) ? entry.occurredOn : todayISO()
+}
+
+function entryMonth(entry) {
+  return entry?.monthKey && parseMonthKey(entry.monthKey) ? entry.monthKey : monthKeyFromISO(entryISO(entry))
+}
+
+function sortEntriesNewest(entries) {
+  return [...entries].sort((a, b) => {
+    const aDate = entryISO(a)
+    const bDate = entryISO(b)
+    if (aDate !== bDate) return aDate < bDate ? 1 : -1
+    return (b.insertOrder || 0) - (a.insertOrder || 0)
+  })
+}
+
+function exactBudgetEntries(catId, options = {}) {
+  const entries = options.all === false
+    ? app.state.entries || []
+    : app.state.allEntries || app.state.entries || []
+  return sortEntriesNewest(entries.filter(entry => String(entry.cat) === String(catId)))
+}
+
+function thisMonthBudgetEntries(catId) {
+  return exactBudgetEntries(catId).filter(entry => entryMonth(entry) === app.key)
+}
+
+function totalEntries(entries) {
+  return roundMoney(entries.reduce((sum, entry) => sum + (Number(entry.amt) || 0), 0))
+}
+
+function entryShortDate(entry) {
+  const iso = entryISO(entry)
+  if (iso === todayISO()) return "Today"
+  const yesterday = new Date()
+  yesterday.setDate(yesterday.getDate() - 1)
+  if (iso === isoFromDate(yesterday)) return "Yesterday"
+  return dateLabelFromISO(iso)
+}
+
+function monthSortLabel(key) {
+  return monthLabel(key)
+}
+
+function renderCategoryHistoryCompact(cat, options = {}) {
+  if (!cat) return ""
+  const monthlyEntries = thisMonthBudgetEntries(cat.id)
+  const allEntries = exactBudgetEntries(cat.id)
+  const total = totalEntries(monthlyEntries)
+  const budget = Number(cat.budget) || 0
+  const remaining = budget - total
+  const hasAllHistory = allEntries.length > 0
+  const rows = monthlyEntries.slice(0, 3)
+  const compactClass = options.compact ? " compact" : ""
+
+  return `
+    <section class="category-history-card${compactClass}" style="--cat:${cssColor(cat.color)};--cat-soft:${cssColor(cat.color)}16">
+      <div class="category-history-head">
+        <div>
+          <div class="section-label">Recent in ${esc(cat.label)}</div>
+          <div class="category-history-total">${fmt(total)} this month · ${remaining >= 0 ? fmt(remaining) + " left" : fmt(Math.abs(remaining)) + " over"}</div>
+        </div>
+        ${hasAllHistory ? `<button class="text-btn compact-history-link" data-action="openCategoryHistory" data-id="${attr(cat.id)}">View full history</button>` : ""}
+      </div>
+      ${rows.length ? `
+        <div class="category-history-rows">
+          ${rows.map(entry => renderCategoryHistoryMiniRow(entry)).join("")}
+        </div>
+      ` : `
+        <div class="category-history-empty">
+          <strong>No ${esc(cat.label)} leaks yet this month</strong>
+          <span>${hasAllHistory ? "Older history is still available." : "Your recent history will show here after you log one."}</span>
+        </div>
+      `}
+    </section>
+  `
+}
+
+function renderCategoryHistoryMiniRow(entry) {
+  const idAttr = entry.shared ? attr(entry.id) : Number(entry.id)
+  return `
+    <button class="category-history-mini" data-action="openCategoryHistoryEdit" data-id="${idAttr}" data-return="capture">
+      <span class="mini-copy">
+        <strong class="clamp-1">${esc(entry.desc || "Expense")}</strong>
+        <small>${esc(entryShortDate(entry))}</small>
+      </span>
+      <span class="mini-amount">${fmt(entry.amt)}</span>
+    </button>
+  `
+}
+
+function categoryHistoryQueryText(entry) {
+  return [
+    entry.desc,
+    fmt(entry.amt),
+    String(Number(entry.amt) || ""),
+    entryShortDate(entry),
+    dateFriendlyLabel(entryISO(entry)),
+    monthLabel(entryMonth(entry)),
+    entry.date
+  ].join(" ").toLowerCase()
+}
+
+function activeCategoryHistoryEntries() {
+  const catId = app.categoryHistory.catId
+  const all = exactBudgetEntries(catId)
+  const scoped = app.categoryHistory.tab === "all"
+    ? all
+    : all.filter(entry => entryMonth(entry) === app.key)
+  const query = String(app.categoryHistory.query || "").trim().toLowerCase()
+  if (!query) return scoped
+  return scoped.filter(entry => categoryHistoryQueryText(entry).includes(query))
+}
+
+function categoryHistoryStats(cat, entries) {
+  const total = totalEntries(entries)
+  if (app.categoryHistory.tab === "all") {
+    const months = new Set(entries.map(entryMonth))
+    const avg = months.size ? roundMoney(total / months.size) : 0
+    return [
+      ["Total", fmt(total)],
+      ["Average / month", fmt(avg)],
+      ["Transactions", String(entries.length)]
+    ]
+  }
+
+  const budget = Number(cat?.budget) || 0
+  const left = budget - total
+  return [
+    ["Spent", fmt(total)],
+    [left >= 0 ? "Left" : "Over", fmt(Math.abs(left))],
+    ["Transactions", String(entries.length)]
+  ]
+}
+
+function groupCategoryHistoryEntries(entries) {
+  const groups = []
+  let current = null
+  for (const entry of entries) {
+    const groupKey = app.categoryHistory.tab === "all" ? entryMonth(entry) : entryISO(entry)
+    const label = app.categoryHistory.tab === "all" ? monthSortLabel(groupKey) : entryShortDate(entry)
+    if (!current || current.key !== groupKey) {
+      current = { key: groupKey, label, total: 0, entries: [] }
+      groups.push(current)
+    }
+    current.entries.push(entry)
+    current.total = roundMoney(current.total + (Number(entry.amt) || 0))
+  }
+  return groups
+}
+
+function renderCategoryHistoryModal() {
+  const cat = categoryById(app.categoryHistory.catId)
+  if (!cat) {
+    closeModal(false)
+    return ""
+  }
+  if (app.categoryHistory.mode === "edit") return renderCategoryHistoryEditModal(cat)
+
+  const entries = activeCategoryHistoryEntries()
+  const stats = categoryHistoryStats(cat, entries)
+  const allEntries = exactBudgetEntries(cat.id)
+  const thisMonthEntries = thisMonthBudgetEntries(cat.id)
+  const groups = groupCategoryHistoryEntries(entries)
+  const emptyCopy = app.categoryHistory.tab === "month" && allEntries.length && !thisMonthEntries.length
+    ? `<button class="text-btn" data-action="setCategoryHistoryTab" data-value="all">View all history</button>`
+    : ""
+
+  return `
+    <div class="sheet category-history-sheet" role="dialog" aria-modal="true" aria-label="${attr(cat.label)} history">
+      <div class="sheet-top">
+        <div class="sheet-title">${esc(cat.label)} history</div>
+        <button class="sheet-close" aria-label="Close" data-action="closeModal">${icon("close")}</button>
+      </div>
+      <div class="category-history-hero" style="--cat:${cssColor(cat.color)};--cat-soft:${cssColor(cat.color)}16">
+        <span class="emoji-box">${esc(cat.icon || "·")}</span>
+        <div>
+          <strong>${app.categoryHistory.tab === "all" ? `${fmt(totalEntries(exactBudgetEntries(cat.id)))} total` : `${fmt(totalEntries(thisMonthBudgetEntries(cat.id)))} this month`}</strong>
+          <small>${esc(cat.label)} · exact budget history</small>
+        </div>
+      </div>
+      <div class="history-tabs" role="tablist" aria-label="History range">
+        <button class="${app.categoryHistory.tab === "month" ? "active" : ""}" data-action="setCategoryHistoryTab" data-value="month">This month</button>
+        <button class="${app.categoryHistory.tab === "all" ? "active" : ""}" data-action="setCategoryHistoryTab" data-value="all">All</button>
+      </div>
+      <div class="history-stats" id="category-history-stats">
+        ${renderCategoryHistoryStatsMarkup(stats)}
+      </div>
+      <input class="field history-search" id="category-history-search" type="search" placeholder="Search description, amount, or date" value="${attr(app.categoryHistory.query)}" autocomplete="off">
+      <div class="history-results" id="category-history-results">
+        ${renderCategoryHistoryResultsMarkup(groups, emptyCopy)}
+      </div>
+    </div>
+  `
+}
+
+function renderCategoryHistoryStatsMarkup(stats) {
+  return stats.map(([label, value]) => `
+    <div>
+      <strong>${esc(value)}</strong>
+      <span>${esc(label)}</span>
+    </div>
+  `).join("")
+}
+
+function renderCategoryHistoryResultsMarkup(groups, emptyCopy = "") {
+  return groups.length ? groups.map(group => `
+    <section class="history-group">
+      <div class="history-group-head">
+        <span>${esc(group.label)}</span>
+        <span>${fmt(group.total)}</span>
+      </div>
+      ${group.entries.map(renderCategoryHistoryRow).join("")}
+    </section>
+  `).join("") : `
+    <div class="empty compact-empty">
+      <div class="empty-title">No matching transactions</div>
+      <div class="row-meta">${app.categoryHistory.query ? "Try another search." : "Nothing here yet."}</div>
+      ${emptyCopy}
+    </div>
+  `
+}
+
+function updateCategoryHistoryResults() {
+  if (app.modal !== "categoryHistory" || app.categoryHistory.mode !== "list") return
+  const cat = categoryById(app.categoryHistory.catId)
+  if (!cat) return
+  const entries = activeCategoryHistoryEntries()
+  const groups = groupCategoryHistoryEntries(entries)
+  const allEntries = exactBudgetEntries(cat.id)
+  const thisMonthEntries = thisMonthBudgetEntries(cat.id)
+  const emptyCopy = app.categoryHistory.tab === "month" && allEntries.length && !thisMonthEntries.length
+    ? `<button class="text-btn" data-action="setCategoryHistoryTab" data-value="all">View all history</button>`
+    : ""
+  const stats = document.getElementById("category-history-stats")
+  const results = document.getElementById("category-history-results")
+  if (stats) stats.innerHTML = renderCategoryHistoryStatsMarkup(categoryHistoryStats(cat, entries))
+  if (results) results.innerHTML = renderCategoryHistoryResultsMarkup(groups, emptyCopy)
+}
+
+function renderCategoryHistoryRow(entry) {
+  const cat = categoryById(entry.cat) || {}
+  const idAttr = entry.shared ? attr(entry.id) : Number(entry.id)
+  const authorInitials = entry.shared && app.cloudUser && entry.createdBy !== app.cloudUser.id && entry.createdByEmail
+    ? initialsFromEmail(entry.createdByEmail)
+    : ""
+  return `
+    <button class="history-row" data-action="openCategoryHistoryEdit" data-id="${idAttr}" data-return="list">
+      <span class="emoji-box" style="background:${cssColor(cat.color || "#0F766E")}16;color:${cssColor(cat.color || "#0F766E")}">${esc(cat.icon || "·")}</span>
+      <span class="row-copy">
+        <span class="row-title clamp-2">${esc(entry.desc || "Expense")}</span>
+        <span class="row-meta clamp-1">${esc(entryShortDate(entry))}${authorInitials ? `<span class="author-chip">${esc(authorInitials)}</span>` : ""}</span>
+      </span>
+      <span class="row-side">
+        <span class="row-amount">${fmt(entry.amt)}</span>
       </span>
     </button>
   `
@@ -3920,6 +4192,7 @@ function renderModal() {
   if (app.modal === "installCoach") modalEl.innerHTML = renderInstallCoachModal()
   if (app.modal === "method") modalEl.innerHTML = renderMethodModal()
   if (app.modal === "iconPicker") modalEl.innerHTML = renderIconPickerModal()
+  if (app.modal === "categoryHistory") modalEl.innerHTML = renderCategoryHistoryModal()
   if (app.modal === "confirm") modalEl.innerHTML = renderConfirmModal()
   if (app.modal === "quickAdd") modalEl.innerHTML = renderQuickAddModal()
   if (app.modal === "cloud") modalEl.innerHTML = renderCloudModal()
@@ -4504,6 +4777,8 @@ function renderQuickAddModal() {
       <input class="field quick-desc" id="add-desc" type="text" placeholder="${selected ? `What was the ${esc(selected.label).toLowerCase()} for?` : "What was it?"}" value="${attr(app.drafts.add.desc)}" autocomplete="off">
 
       <button class="primary-btn quick-save" id="save-expense" data-action="saveQuickExpense" ${canSaveExpense() ? "" : "disabled"}>${icon("check")} Save</button>
+
+      ${selected ? renderCategoryHistoryCompact(selected, { compact: true }) : ""}
     </div>
   `
 }
@@ -4522,15 +4797,7 @@ function chooseQuickCat(id) {
   if (!categoryById(id)) return
   haptic("selection")
   app.selectedCat = id
-  modalEl.querySelectorAll(".quick-cat").forEach(el => {
-    el.classList.toggle("active", el.dataset.id === id)
-  })
-  const desc = document.getElementById("add-desc")
-  if (desc) {
-    const cat = categoryById(id)
-    desc.placeholder = cat ? `What was the ${cat.label.toLowerCase()} for?` : "What was it?"
-  }
-  updateButtonState("save-expense", canSaveExpense())
+  renderModal()
 }
 
 async function saveQuickExpense() {
@@ -4648,6 +4915,61 @@ function renderEntryEditModal() {
         <button class="primary-btn" data-action="saveEditingEntry">${icon("check")} Save</button>
       </div>
       <button class="secondary-btn" style="width:100%;margin-top:8px" data-action="saveEditingAsPreset">${icon("settings")} Save as preset</button>
+    </div>
+  `
+}
+
+function renderCategoryHistoryEditModal(cat) {
+  const entry = entryById(app.editingEntryId)
+  if (!entry) {
+    app.categoryHistory.mode = "list"
+    return renderCategoryHistoryModal()
+  }
+  const editDate = clampExpenseDateISO(app.drafts.edit.dateISO || entry.dateISO || entry.occurredOn)
+  const currentCat = categoryById(app.editingCat) || cat
+
+  return `
+    <div class="sheet category-history-sheet history-edit-sheet" role="dialog" aria-modal="true" aria-label="Edit transaction">
+      <div class="sheet-top">
+        <button class="back-btn compact-back" aria-label="Back" data-action="backCategoryHistory">${icon("back")}</button>
+        <div class="sheet-title">Edit transaction</div>
+        <button class="sheet-close" aria-label="Close" data-action="closeModal">${icon("close")}</button>
+      </div>
+      <div class="history-edit-context" style="--cat:${cssColor(currentCat.color || cat.color)};--cat-soft:${cssColor(currentCat.color || cat.color)}16">
+        <span class="emoji-box">${esc(currentCat.icon || "·")}</span>
+        <span>
+          <strong>${esc(currentCat.label || "Budget")}</strong>
+          <small>${entry.shared ? "Shared transaction" : "Local transaction"}</small>
+        </span>
+      </div>
+      <div class="field-group">
+        <div class="field-label">Description</div>
+        <input class="field" id="edit-desc" type="text" placeholder="Description" value="${attr(app.drafts.edit.desc)}">
+      </div>
+      <div class="field-group">
+        <div class="field-label">Amount</div>
+        <input class="field" id="edit-amt" type="number" inputmode="decimal" placeholder="$0.00" value="${attr(app.drafts.edit.amt)}">
+      </div>
+      <div class="field-group">
+        <div class="field-label">Date</div>
+        <input class="field date-field" id="edit-date" type="date" max="${attr(todayISO())}" value="${attr(editDate)}">
+        <div class="field-hint" id="edit-date-hint">${esc(dateFriendlyLabel(editDate))}</div>
+      </div>
+      <div class="field-label">Category</div>
+      ${entry.shared ? `
+        <div class="history-shared-note">
+          <strong>${esc(cat.label)}</strong>
+          <span>Shared transactions stay in this budget.</span>
+        </div>
+      ` : `
+        <div class="pill-wrap">
+          ${renderCategoryPills(app.editingCat, "pickEditCat")}
+        </div>
+      `}
+      <div class="sheet-actions">
+        <button class="danger-btn" data-action="deleteCategoryHistoryEntry">${icon("trash")} Delete</button>
+        <button class="primary-btn" data-action="saveCategoryHistoryEntry">${icon("check")} Save</button>
+      </div>
     </div>
   `
 }
@@ -5156,6 +5478,11 @@ function handleInput(event) {
     updateIconPickerResults()
   }
 
+  if (target.id === "category-history-search") {
+    app.categoryHistory.query = target.value
+    updateCategoryHistoryResults()
+  }
+
   if (target.id === "workspace-name") {
     app.shareDraft.name = target.value
     updateButtonState("create-workspace-btn", !!app.shareDraft.name.trim())
@@ -5193,9 +5520,16 @@ function handleClick(event) {
   const mode = target.dataset.mode
   const targetName = target.dataset.target
   const value = target.dataset.value
+  const returnMode = target.dataset.return
 
   if (action === "go") go(view)
   if (action === "quickAdd") quickAdd(id)
+  if (action === "openCategoryHistory") openCategoryHistory(id)
+  if (action === "openCategoryHistoryEdit") openCategoryHistoryEdit(id, returnMode)
+  if (action === "backCategoryHistory") backCategoryHistory()
+  if (action === "setCategoryHistoryTab") setCategoryHistoryTab(value)
+  if (action === "saveCategoryHistoryEntry") saveCategoryHistoryEntry()
+  if (action === "deleteCategoryHistoryEntry") deleteCategoryHistoryEntry()
   if (action === "openCatPicker") openModal("catPicker")
   if (action === "chooseCat") chooseCat(id)
   if (action === "saveExpense") saveExpense()
@@ -5677,6 +6011,92 @@ function quickAdd(id) {
   app.view = "add"
   render()
   requestAnimationFrame(() => document.getElementById("add-amt")?.focus())
+}
+
+function resetCategoryHistory() {
+  app.categoryHistory = {
+    catId: null,
+    tab: "month",
+    query: "",
+    mode: "list",
+    returnModal: null,
+    editBack: "list"
+  }
+}
+
+function openCategoryHistory(id) {
+  if (!categoryById(id)) return
+  haptic("light")
+  app.categoryHistory = {
+    catId: id,
+    tab: "month",
+    query: "",
+    mode: "list",
+    returnModal: app.modal === "quickAdd" ? "quickAdd" : null,
+    editBack: "list"
+  }
+  app.modal = "categoryHistory"
+  renderModal()
+}
+
+function openCategoryHistoryEdit(id, back = "list") {
+  const entry = entryById(id)
+  if (!entry || !categoryById(entry.cat)) return
+  haptic("light")
+  app.categoryHistory.catId = entry.cat
+  app.categoryHistory.mode = "edit"
+  app.categoryHistory.editBack = back === "capture" ? "capture" : "list"
+  if (!app.categoryHistory.returnModal) app.categoryHistory.returnModal = app.modal === "quickAdd" ? "quickAdd" : null
+  app.editingEntryId = entry.shared ? String(entry.id) : Number(entry.id)
+  app.editingEntryShared = !!entry.shared
+  app.editingCat = entry.cat
+  app.drafts.edit = {
+    desc: entry.desc || "",
+    amt: String(Number(entry.amt) || ""),
+    dateISO: clampExpenseDateISO(entry.dateISO || entry.occurredOn)
+  }
+  app.modal = "categoryHistory"
+  renderModal()
+}
+
+function closeCategoryHistory(shouldRender = true) {
+  const returnModal = app.categoryHistory.returnModal
+  resetCategoryHistory()
+  app.editingEntryId = null
+  app.editingEntryShared = false
+  app.editingCat = null
+  if (returnModal) {
+    app.modal = returnModal
+    if (shouldRender) renderModal()
+    return
+  }
+  app.modal = null
+  if (shouldRender) {
+    render()
+  }
+}
+
+function backCategoryHistory() {
+  if (app.categoryHistory.mode !== "edit") {
+    closeCategoryHistory()
+    return
+  }
+  app.editingEntryId = null
+  app.editingEntryShared = false
+  app.editingCat = null
+  if (app.categoryHistory.editBack === "capture") {
+    closeCategoryHistory()
+    return
+  }
+  app.categoryHistory.mode = "list"
+  app.categoryHistory.editBack = "list"
+  renderModal()
+}
+
+function setCategoryHistoryTab(value) {
+  app.categoryHistory.tab = value === "all" ? "all" : "month"
+  haptic("selection")
+  renderModal()
 }
 
 function openModal(name) {
@@ -6274,6 +6694,11 @@ function closeModal(shouldRender = true) {
     return
   }
 
+  if (app.modal === "categoryHistory") {
+    closeCategoryHistory(shouldRender)
+    return
+  }
+
   app.modal = null
   app.confirmConfig = null
   app.confirmDeleteCtx = null
@@ -6284,6 +6709,7 @@ function closeModal(shouldRender = true) {
   app.editingPresetCat = null
   app.editingEntryId = null
   app.editingCat = null
+  app.editingEntryShared = false
   app.editingWishId = null
   app.editingWishCat = null
   app.iconPickerTarget = null
@@ -6836,7 +7262,23 @@ function pickEditCat(id) {
   renderModal()
 }
 
-async function saveEditingEntry() {
+function finishCategoryHistoryEdit(message, hapticType = "success") {
+  const returnToCapture = app.categoryHistory.editBack === "capture"
+  if (returnToCapture) {
+    closeCategoryHistory(false)
+  } else {
+    app.categoryHistory.mode = "list"
+    app.categoryHistory.editBack = "list"
+    app.editingEntryId = null
+    app.editingEntryShared = false
+    app.editingCat = null
+  }
+  render()
+  haptic(hapticType)
+  toast(message)
+}
+
+async function saveEditingEntry(options = {}) {
   const entry = entryById(app.editingEntryId)
   const amount = Number(app.drafts.edit.amt)
   if (!entry || !app.editingCat || amount <= 0) {
@@ -6861,6 +7303,10 @@ async function saveEditingEntry() {
       occurredOn: selectedDate
     })
     if (!ok) { haptic("error"); return }
+    if (options.categoryHistory) {
+      finishCategoryHistoryEdit(targetMonthKey === currentMonthKey ? "Expense updated" : `Moved to ${monthShortLabel(targetMonthKey)}`)
+      return
+    }
     closeModal(false)
     render()
     haptic("success")
@@ -6896,8 +7342,12 @@ async function saveEditingEntry() {
     markActiveMonth(app.data, targetMonthKey)
   }
 
-  closeModal(false)
   saveData(app.data)
+  if (options.categoryHistory) {
+    finishCategoryHistoryEdit(targetMonthKey === monthKey ? "Expense updated" : `Moved to ${monthShortLabel(targetMonthKey)}`)
+    return
+  }
+  closeModal(false)
   render()
   haptic("success")
   toast(targetMonthKey === monthKey ? "Expense updated" : `Moved to ${monthShortLabel(targetMonthKey)}`)
@@ -6921,6 +7371,10 @@ async function deleteEntry(id, options = {}) {
   if (entry.shared) {
     const ok = await sharedDeleteTransaction(entry.id)
     if (!ok) { haptic("error"); return }
+    if (options.categoryHistory) {
+      finishCategoryHistoryEdit("Deleted", "warning")
+      return
+    }
     render()
     haptic("warning")
     const txId = entry.id
@@ -6944,6 +7398,10 @@ async function deleteEntry(id, options = {}) {
   const snapshot = clone(rawEntry)
   app.data[monthKey] = app.data[monthKey].filter(e => String(e.id) !== targetId)
   saveData(app.data)
+  if (options.categoryHistory) {
+    finishCategoryHistoryEdit("Deleted", "warning")
+    return
+  }
   render()
   haptic("warning")
   undoToast(`Deleted "${entry.desc || "Expense"}"`, () => {
@@ -6952,6 +7410,27 @@ async function deleteEntry(id, options = {}) {
     saveData(app.data)
     render()
     toast("Restored")
+  })
+}
+
+function saveCategoryHistoryEntry() {
+  saveEditingEntry({ categoryHistory: true })
+}
+
+function deleteCategoryHistoryEntry() {
+  const id = app.editingEntryId
+  const entry = entryById(id)
+  if (!entry) return
+  confirmSheet({
+    title: "Delete this expense?",
+    body: `"${entry.desc || "Expense"}" will be removed from your activity.`,
+    primaryLabel: "Delete",
+    destructive: true,
+    onCancel: () => {
+      app.modal = "categoryHistory"
+      renderModal()
+    },
+    onConfirm: () => deleteEntry(id, { confirmed: true, categoryHistory: true })
   })
 }
 
