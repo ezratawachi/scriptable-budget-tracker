@@ -1,5 +1,5 @@
 const STORAGE_KEY = "budget_tracker_pwa_v1"
-const APP_VERSION = "42"
+const APP_VERSION = "43"
 const ROLLOVER_START_KEY = "2026-4"
 const REVIEW_REQUIRED_MONTHS = 4
 const REVIEW_HANDOFF_URL = `https://ezratawachi.github.io/scriptable-budget-tracker/pwa/?v=${APP_VERSION}&review=1`
@@ -2599,7 +2599,7 @@ function renderBudgetCard(budget) {
     : ""
 
   return `
-    <button class="card budget-card ${budget.shared ? "is-shared" : ""}" data-action="quickAdd" data-id="${attr(budget.id)}" style="--cat:${cssColor(budget.color)};--cat-soft:${cssColor(budget.color)}16">
+    <button class="card budget-card ${budget.shared ? "is-shared" : ""}" data-action="openBudgetCapture" data-id="${attr(budget.id)}" style="--cat:${cssColor(budget.color)};--cat-soft:${cssColor(budget.color)}16">
       <div class="budget-top">
         <div class="budget-left">
           <span class="emoji-box">${esc(budget.icon)}</span>
@@ -2634,49 +2634,49 @@ function renderAdd() {
         <button class="top-btn icon-btn" title="Presets" aria-label="Presets" data-action="go" data-view="presets">${icon("settings")}</button>
       `)}
 
-      <div class="section">
-        <div class="section-row">
-          <div class="section-label">Quick presets</div>
-          <button class="text-btn" data-action="go" data-view="presets">Manage</button>
+      <div class="scroll add-scroll">
+        <div class="section">
+          <div class="section-row">
+            <div class="section-label">Quick presets</div>
+            <button class="text-btn" data-action="go" data-view="presets">Manage</button>
+          </div>
+          <div class="row-scroll">
+            ${renderPresetButtons()}
+          </div>
         </div>
-        <div class="row-scroll">
-          ${renderPresetButtons()}
+
+        <div class="section">
+          <div class="section-row">
+            <div class="section-label">Category</div>
+            <button class="text-btn" data-action="openCatPicker">Change</button>
+          </div>
+          <button class="selected-cat" style="border-color:${selectedColor};background:${selected ? cssColor(selected.color) + "10" : "var(--card)"};color:${selected ? cssColor(selected.color) : "var(--txt)"}" data-action="openCatPicker">
+            <span class="emoji-box" style="background:${selected ? cssColor(selected.color) + "16" : "var(--card2)"};color:${selected ? cssColor(selected.color) : "var(--txt)"}">${selected ? esc(selected.icon) : icon("add")}</span>
+            <span class="label">${selected ? esc(selected.label) : "Choose a category"}</span>
+            <span class="arrow">${icon("back", "", "chevron-next")}</span>
+          </button>
         </div>
-      </div>
 
-      <div class="section">
-        <div class="section-row">
-          <div class="section-label">Category</div>
-          <button class="text-btn" data-action="openCatPicker">Change</button>
+        <div class="field-group">
+          <div class="field-label">Amount</div>
+          <input class="field" id="add-amt" type="number" inputmode="decimal" placeholder="$0.00" value="${attr(app.drafts.add.amt)}">
         </div>
-        <button class="selected-cat" style="border-color:${selectedColor};background:${selected ? cssColor(selected.color) + "10" : "var(--card)"};color:${selected ? cssColor(selected.color) : "var(--txt)"}" data-action="openCatPicker">
-          <span class="emoji-box" style="background:${selected ? cssColor(selected.color) + "16" : "var(--card2)"};color:${selected ? cssColor(selected.color) : "var(--txt)"}">${selected ? esc(selected.icon) : icon("add")}</span>
-          <span class="label">${selected ? esc(selected.label) : "Choose a category"}</span>
-          <span class="arrow">${icon("back", "", "chevron-next")}</span>
-        </button>
+
+        <div class="field-group">
+          <div class="field-label">Date</div>
+          <input class="field date-field" id="add-date" type="date" max="${attr(todayISO())}" value="${attr(addDate)}">
+          <div class="field-hint" id="add-date-hint">${esc(dateFriendlyLabel(addDate))}</div>
+        </div>
+
+        <div class="field-group">
+          <div class="field-label">Description</div>
+          <input class="field" id="add-desc" type="text" placeholder="e.g. Starbucks" value="${attr(app.drafts.add.desc)}">
+        </div>
+
+        <button class="primary-btn" id="save-expense" data-action="saveExpense" ${canSaveExpense() ? "" : "disabled"}>${icon("check")} Save Expense</button>
+
+        ${selected ? renderCategoryHistoryCompact(selected) : ""}
       </div>
-
-      <div class="field-group">
-        <div class="field-label">Amount</div>
-        <input class="field" id="add-amt" type="number" inputmode="decimal" placeholder="$0.00" value="${attr(app.drafts.add.amt)}">
-      </div>
-
-      <div class="field-group">
-        <div class="field-label">Date</div>
-        <input class="field date-field" id="add-date" type="date" max="${attr(todayISO())}" value="${attr(addDate)}">
-        <div class="field-hint" id="add-date-hint">${esc(dateFriendlyLabel(addDate))}</div>
-      </div>
-
-      <div class="field-group">
-        <div class="field-label">Description</div>
-        <input class="field" id="add-desc" type="text" placeholder="e.g. Starbucks" value="${attr(app.drafts.add.desc)}">
-      </div>
-
-      <button class="primary-btn" id="save-expense" data-action="saveExpense" ${canSaveExpense() ? "" : "disabled"}>${icon("check")} Save Expense</button>
-
-      ${selected ? renderCategoryHistoryCompact(selected) : ""}
-
-      <div class="scroll"></div>
       ${nav()}
     </section>
   `
@@ -5523,7 +5523,8 @@ function handleClick(event) {
   const returnMode = target.dataset.return
 
   if (action === "go") go(view)
-  if (action === "quickAdd") quickAdd(id)
+  if (action === "quickAdd") openBudgetCapture(id)
+  if (action === "openBudgetCapture") openBudgetCapture(id)
   if (action === "openCategoryHistory") openCategoryHistory(id)
   if (action === "openCategoryHistoryEdit") openCategoryHistoryEdit(id, returnMode)
   if (action === "backCategoryHistory") backCategoryHistory()
@@ -6005,12 +6006,17 @@ function go(view) {
   render()
 }
 
-function quickAdd(id) {
+function openBudgetCapture(id) {
+  if (!categoryById(id)) return
   haptic("light")
   app.selectedCat = id
   app.view = "add"
+  closeModal(false)
   render()
-  requestAnimationFrame(() => document.getElementById("add-amt")?.focus())
+  requestAnimationFrame(() => {
+    const scroll = document.querySelector(".add-scroll")
+    if (scroll) scroll.scrollTop = 0
+  })
 }
 
 function resetCategoryHistory() {

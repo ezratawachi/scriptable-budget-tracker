@@ -619,6 +619,15 @@ input:focus-visible{
   padding-bottom:10px;
 }
 
+.add-scroll{
+  padding-bottom:18px;
+}
+
+.add-scroll > .primary-btn{
+  width:100%;
+  flex-shrink:0;
+}
+
 .log-day{
   display:flex;
   flex-direction:column;
